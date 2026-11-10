@@ -1,15 +1,22 @@
-from abc import abstractmethod
-
-from datatype.Operation import MultipleOperation
+from datatype.Operation import MultipleOperation, Operation
 
 
 class AddOperation(MultipleOperation):
-    @staticmethod
-    def instance():
-        return AddOperation()
+    """Sum. On bool: "or". A negative value subtracts — there is no ``sub``."""
 
-    def useInt(self, *values):
+    rank = 10
+
+    def name(self) -> str:
+        return "add"
+
+    def use_int(self, *values):
         return sum(values)
 
-    def useBool(self, *values):
+    def use_number(self, *values):
+        return sum(values)
+
+    def use_bool(self, *values):
         return any(values)
+
+
+Operation.register(AddOperation())

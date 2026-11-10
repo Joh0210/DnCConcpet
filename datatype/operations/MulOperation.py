@@ -1,16 +1,28 @@
-from abc import abstractmethod
-from operator import mul
+import math
 
-from datatype.Operation import MultipleOperation
+from datatype.Operation import MultipleOperation, Operation
 
 
 class MulOperation(MultipleOperation):
-    @staticmethod
-    def instance():
-        return MulOperation()
+    """
+    Product. On int the result is floored, so a fractional factor rounds down
+    (there is no ``div``). On bool: "and".
+    """
 
-    def useInt(self, *values):
-        return mul(*values)
+    rank = 20
 
-    def useBool(self, *values):
+    def name(self) -> str:
+        return "mul"
+
+    def use_int(self, *values):
+        # math.prod instead of operator.mul: works for any number of values.
+        return math.floor(math.prod(values))
+
+    def use_number(self, *values):
+        return math.prod(values)
+
+    def use_bool(self, *values):
         return all(values)
+
+
+Operation.register(MulOperation())

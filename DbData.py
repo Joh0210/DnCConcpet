@@ -1,44 +1,86 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Union
+
+#: Saved content of one container, shaped like the container (concept §4.13):
+#: single → one DbData, list → a list, map → key → DbData.
+ChildrenData = Union["DbData", list["DbData"], dict[str, "DbData"]]
 
 
 @dataclass
 class DbData:
     """
-    The serialized form of one component: its `name` (= register id), its stored
-    property values, and its sub-containers' contents keyed by container id.
-    Produced by `DataUtil.save_data`, consumed by `DataUtil.load_from_data`.
+    The saved form of one instance (concept §4.13). A save stores only what the
+    definitions cannot know; everything else is rebuilt from them:
+
+    - ``def_id``: the definition id (JSON key ``def``),
+    - ``choices``: serialized values of ``choice`` props the user picked
+      (being present here *is* the "reviewed" flag — no extra wire format),
+    - ``state``: serialized values of ``state`` props that changed in play,
+    - ``children``: container id → saved children, shaped like the container.
+
+    Values are strings produced by ``Datatype.serialize``; reading accepts native
+    JSON values too (``Datatype.parse``).
     """
 
-    name: str
-    storable_data: dict[str, str] = field(default_factory=dict)
-    # TS: Record<string, Map<string, DbData>>
-    component_data: dict[str, dict[str, DbData]] = field(default_factory=dict)
+    def_id: str
+    choices: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
+    children: dict[str, ChildrenData] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        """Nothing beyond the definition id — the instance is exactly its definition."""
+        return not self.choices and not self.state and not self.children
 
     def to_dict(self) -> dict[str, Any]:
-        """Converts to a JSON-compatible dict using the original TS key names."""
-        return {
-            "storableData": dict(self.storable_data),
-            "componentData": {
-                container_id: {key: child.to_dict() for key, child in children.items()}
-                for container_id, children in self.component_data.items()
-            },
-            "name": self.name,
-        }
+        """JSON-compatible dict with the keys of concept §4.13; empty sections are left out."""
+        result: dict[str, Any] = {"def": self.def_id}
+        if self.choices:
+            result["choices"] = dict(self.choices)
+        if self.state:
+            result["state"] = dict(self.state)
+        if self.children:
+            result["children"] = {
+                container_id: _children_to_dict(children)
+                for container_id, children in self.children.items()
+            }
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DbData:
-        """Builds a DbData from a dict using the original TS key names."""
         return cls(
-            name=data["name"],
-            storable_data=dict(data.get("storableData", {})),
-            component_data={
-                container_id: {key: cls.from_dict(child) for key, child in children.items()}
-                for container_id, children in data.get("componentData", {}).items()
+            def_id=data["def"],
+            choices=dict(data.get("choices", {})),
+            state=dict(data.get("state", {})),
+            children={
+                container_id: _children_from_dict(children)
+                for container_id, children in data.get("children", {}).items()
             },
         )
+
+    @classmethod
+    def coerce(cls, data: DbData | dict[str, Any]) -> DbData:
+        """Accept a DbData or its dict form."""
+        return data if isinstance(data, DbData) else cls.from_dict(data)
+
+
+def _children_to_dict(children: ChildrenData) -> Any:
+    if isinstance(children, DbData):
+        return children.to_dict()
+    if isinstance(children, list):
+        return [child.to_dict() for child in children]
+    return {key: child.to_dict() for key, child in children.items()}
+
+
+def _children_from_dict(children: Any) -> ChildrenData:
+    if isinstance(children, DbData):
+        return children
+    if isinstance(children, list):
+        return [DbData.coerce(child) for child in children]
+    if "def" in children:  # a single child
+        return DbData.from_dict(children)
+    return {key: DbData.coerce(child) for key, child in children.items()}
 
 
 @dataclass

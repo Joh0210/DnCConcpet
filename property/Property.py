@@ -1,159 +1,413 @@
-import InnerFunction
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, Any
+
+from InnerFunction import EvalContext, InnerFunction, evaluate_value
 from datatype.Datatype import Datatype
+from errors import (
+    CyclicDependencyError,
+    DefinitionError,
+    IllegalMutationError,
+    PropertyError,
+    did_you_mean,
+)
 from property.BufferElement import BufferElement
+from property.Source import Source
+
+if TYPE_CHECKING:
+    from Instance import Instance
+    from property.Manipulation import Manipulation
+
+log = logging.getLogger("engine")
+
+#: Keys a property declaration (an entry under ``props:``) may contain.
+SPEC_KEYS = {"type", "source", "default", "derive", "modifiable", "range", "options", "clamp", "optional"}
+#: Keys a ``refine:`` entry may contain.
+REFINE_KEYS = {"range", "options", "default", "lock"}
+
+_NOTHING = object()
 
 
 class Property:
-    # todo: add an flag to allow for extension properties. This would just be ref properties, with an additional evaluation
-    # todo: add option for lower and upper limits, as well as an option for selected values only.
-    #  Weather one of those is applicable for the corresponding datatype is defined by the type (e.g. lower limit for string does not make sense9
-    def __init__(self, id: str, instance: "Instance", dataType: Datatype, baseValue: str | InnerFunction, choice: bool):
+    """
+    One value of an instance (concept §4.4) — and the core of the observer pattern.
+
+    The value is computed as::
+
+        base (from the source) → manipulations, sorted by their order → clamp
+
+    and cached. The BufferElement records what the computation read and drops the
+    cache when any of it changes, so dependants never see a stale value and
+    nothing recomputes needlessly.
+
+    Built from the declaration in the YML/JSON (``props: {weight: {type: number, ...}}``):
+
+    - ``type``: name of a :class:`Datatype`; it parses, validates and combines values.
+    - ``source``: where the base comes from (:mod:`property.Source`); ``derive``
+      implies ``derived``, otherwise ``const`` is the default.
+    - ``default`` / ``derive``: literal or :class:`InnerFunction`.
+    - ``modifiable``: whether effects may change the value.
+    - ``range`` (bounds may be expressions), ``options``, ``clamp`` (after all
+      effects), ``optional`` (may be ``None``).
+    """
+
+    def __init__(self, instance: Instance, id: str, spec: dict):
         self.id = id
         self.instance = instance
-        self.dataType = dataType
 
-        self.choice = choice
+        unknown = set(spec) - SPEC_KEYS
+        if unknown:
+            key = sorted(unknown)[0]
+            raise DefinitionError(f"prop '{id}': unknown key '{key}'{did_you_mean(key, SPEC_KEYS)}")
+        if "type" not in spec:
+            raise DefinitionError(f"prop '{id}' has no type")
 
+        self.datatype: Datatype = Datatype.get(spec["type"])
+        source = spec.get("source", "derived" if "derive" in spec else "const")
+        if "derive" in spec and source != "derived":
+            raise DefinitionError(f"prop '{id}': 'derive' cannot be combined with source '{source}'")
+        self.source: Source = Source.get(source)
+        self.modifiable: bool = bool(spec.get("modifiable", False))
+        self.optional: bool = bool(spec.get("optional", False))
 
-        self.__baseValue = baseValue
+        # Base value (const / derived) or default (choice / state / param): literal or InnerFunction.
+        self._base: Any = spec.get("derive", spec.get("default"))
+        self._has_base: bool = "derive" in spec or "default" in spec
+        self._range = self._check_bounds(spec.get("range"), "range")
+        self._options = spec.get("options")
+        self._clamp = self._check_bounds(spec.get("clamp"), "clamp")
+        self._locked = False
+
+        # The value picked by the user (choice) or written in play (state). It
+        # replaces the *base* value, not the result: effects still apply on top
+        # (attribute.value is chosen *and* raised by enchantments).
+        self._stored: Any = None
+        self._has_stored = False
+        """
+        Indicates that the user has set the property explicitly and it didn't just
+        use the default value. (Only relevant for choice properties.)
+        """
+        self._reviewed = False
 
         """
-        Dynamic manipulations added by external modifiers. Wiped by {@link remove}
-        and re-applied when the owning component is re-attached.
+        Effects bound to this property by the root of its tree (Instance._rebind).
+        Bound and unbound as the structure changes.
         """
-        self._manipulationTrace = []
+        self._manipulation_trace: list[Manipulation] = []
         """
-        Manipulations that are part of the component's own definition (added in
-        its constructor). They are permanent and survive {@link remove}.
+        Kernel-internal manipulations that are part of the property itself. They
+        are permanent and survive remove().
         """
-        self._staticManipulation = []
+        self._static_manipulation: list[Manipulation] = []
 
-        self.__cachedValue = None
-        self.__hasCache = False
+        self._cached_value: Any = None
+        self._has_cache = False
 
         """
-        Guards against cyclic dependencies while {@link calc} is running.
+        Guards against cyclic dependencies while calc is running.
         """
         self._resolving = False
         """
-        Value accumulated so far, returned when a cycle re-enters {@link calc}.
+        Value accumulated so far, returned when a cycle re-enters calc.
         """
-        self._partialValue = None
-        self._cycleReported = False
-
-        self._override = None # todo: this needs to be saved
-        """
-        Indicates that the property has been overridden by a user.     
-        Also indicates that the property has been set by a user, and didn't just use the default value. (Only relevant for choice properties.)
-        """
-        self._isOverridden = False # todo: this needs to be saved
+        self._partial_value: Any = _NOTHING
+        self._cycle_reported = False
 
         """
         Notifies properties that depend on this one when its value changes, and
         clears this property's own cache when a dependency changes.
         """
-        self._propertyBuffer = BufferElement(
-            self.instance.propCallStack, self.onUpdate
-        )
+        self._property_buffer = BufferElement(self.instance.prop_call_stack, self._on_update)
 
-    def reviewed(self):
-        return self._reviewed or not self.choice
+    # ------------------------------------------------------------------ definition
 
-    # todo: validate input before setting
-    def override(self, value: str):
-        self._override = value
-        self._isOverridden = True
-        self._propertyBuffer.update_and_reset_lower_list()
+    def adjust(self, value: Any) -> None:
+        """A ``set`` in a definition: the base value (const) or the default (choice / state / param)."""
+        if not self.source.settable:
+            raise DefinitionError(f"'{self.path_str}' is {self.source.name}; it cannot be set")
+        self._base = value
+        self._has_base = True
+        self._property_buffer.update()
 
-    def resetOverride(self):
-        self._override = None
-        self._isOverridden = False
-        self._propertyBuffer.update_and_reset_lower_list()
+    def refine(self, spec: dict) -> None:
+        """A ``refine`` in a definition: narrow ``range`` / ``options``, change ``default``, ``lock`` a choice."""
+        unknown = set(spec) - REFINE_KEYS
+        if unknown:
+            key = sorted(unknown)[0]
+            raise DefinitionError(
+                f"refine of '{self.path_str}': unknown key '{key}'{did_you_mean(key, REFINE_KEYS)}"
+            )
+        if "range" in spec:
+            self._range = self._check_bounds(spec["range"], "range")
+        if "options" in spec:
+            self._options = spec["options"]
+        if "default" in spec:
+            self.adjust(spec["default"])
+        if "lock" in spec:
+            if not self.source.choosable:
+                raise DefinitionError(f"'{self.path_str}' is {self.source.name}; only a choice can be locked")
+            self._base = spec["lock"]
+            self._has_base = True
+            self._locked = True
+        self._property_buffer.update()
 
+    def is_open(self) -> bool:
+        """Declared without a value — allowed only on abstract entries."""
+        return not self._has_base and not self.optional and self.source.requires_value
 
-    def onUpdate(self):
-        self.__cachedValue = None
-        self.__hasCache = False
+    def _check_bounds(self, bounds: Any, key: str) -> list | None:
+        if bounds is None:
+            return None
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            raise DefinitionError(f"prop '{self.id}': '{key}' must be [min, max] (null = unbounded)")
+        if not self.datatype.ordered:
+            raise DefinitionError(f"prop '{self.id}': type '{self.datatype.name()}' has no order, '{key}' makes no sense")
+        return list(bounds)
 
+    # ------------------------------------------------------------------ reading
 
-    def resolve(self):
-        return self._propertyBuffer.read_operation()
+    def resolve(self) -> Any:
+        """The current value. Whoever is resolving right now becomes a dependant (see BufferElement)."""
+        return self._property_buffer.read_operation(self._cached_calc)
 
-    def tempCalc(self):
-        if (self.__hasCache or self._propertyBuffer.should_update):
-            self.__cachedValue = self.calc()
-            self.__hasCache = True
-        return self.__cachedValue
+    def _cached_calc(self) -> Any:
+        if not self._has_cache or self._property_buffer.should_update:
+            self._cached_value = self.calc()
+            self._has_cache = True
+        return self._cached_value
 
-    def calc(self):
-        if(self._override != None and self._isOverridden):
-            return self.dataType.deserialize(self._override)
+    def _on_update(self) -> None:
+        self._cached_value = None
+        self._has_cache = False
 
-        if(self._resolving):
-            self.reportCycle()
-            if(self._partialValue != None):
-                return self._partialValue
-            else:
-                return self.baseValue()
+    def calc(self) -> Any:
+        if self._resolving:
+            if self._partial_value is _NOTHING:
+                raise CyclicDependencyError(
+                    f"'{self.path_str}' depends on itself while computing its base value"
+                )
+            self._report_cycle()
+            return self._partial_value
 
         self._resolving = True
         try:
-            ret = self.baseValue()
-            self.partialValue = ret
+            ret = self.base_value()
+            self._partial_value = ret
 
-            for manipulation in self._staticManipulation:
-                ret = manipulation.valueFunc(ret, self.instance)
-                self.partialValue = ret
+            if ret is not None:  # an absent optional value stays absent
+                for manipulation in self.get_manipulation_trace():
+                    ret = manipulation.apply(ret, self)
+                    self._partial_value = ret
+                ret = self._apply_clamp(ret)
 
             return ret
         finally:
             self._resolving = False
-            self._partialValue = None
+            self._partial_value = _NOTHING
 
+    def base_value(self) -> Any:
+        """The value before any effect, as the source defines it."""
+        return self.source.base(self)
 
+    @property
+    def base_expression(self) -> Any:
+        """The declared base / default: a literal or an InnerFunction."""
+        return self._base
 
-    def baseValue(self):
-        if isinstance(self.__baseValue, InnerFunction):
-            return self.instance.resolveInnerFunction(self.__baseValue).resolve()
-        return self.dataType.deserialize(self.__baseValue)
+    def convert(self, raw: Any, what: str = "value") -> Any:
+        """A literal parsed, or an expression evaluated (``this`` = the instance), checked by the datatype."""
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, InnerFunction):
+                value = raw.evaluate(EvalContext(this=self.instance))
+                return None if value is None else self.datatype.validate(value)
+            return self.datatype.parse(raw)
+        except ValueError as error:
+            raise PropertyError(f"'{self.path_str}': invalid {what}: {error}") from error
 
-    def reportCycle(self):
-        if self._cycleReported:
+    def bounds(self) -> tuple[Any, Any]:
+        """``range`` evaluated; ``(None, None)`` when unbounded."""
+        if self._range is None:
+            return None, None
+        lower, upper = self._range
+        return self.convert(lower, "range bound"), self.convert(upper, "range bound")
+
+    def options(self) -> list | None:
+        """``options`` evaluated, or ``None`` when any value of the type is allowed."""
+        if self._options is None:
+            return None
+        options = evaluate_value(self._options, EvalContext(this=self.instance))
+        return [self.convert(option, "option") for option in options]
+
+    def _apply_clamp(self, value: Any) -> Any:
+        if self._clamp is None:
+            return value
+        lower, upper = (self.convert(bound, "clamp bound") for bound in self._clamp)
+        return self.datatype.clamp(value, lower, upper)
+
+    def _report_cycle(self) -> None:
+        if self._cycle_reported:
             return
-        self._cycleReported = True
+        self._cycle_reported = True
+        # todo: alternative for production (Sentry in the TS version)
+        log.warning(
+            "cyclic dependency detected while resolving '%s'; returning the value accumulated so far",
+            self.path_str,
+        )
 
-        message =  f"MutableProperty: cyclic dependency detected while resolving '{self.id}' on '{self.definition.pathAsStr}' returning the value accumulated so far."
+    # ------------------------------------------------------------------ writing
 
-        # todo: alternative for production
-        print(message)
+    def choose(self, value: Any) -> None:
+        """
+        Pick the value of a ``choice`` prop (Wiki / sheet). Checked against
+        ``range`` / ``options``; marks the prop as reviewed.
+        """
+        if not self.source.choosable:
+            raise PropertyError(
+                f"'{self.path_str}' is a {self.source.name} property; only choice properties can be chosen"
+            )
+        if self._locked:
+            raise PropertyError(f"'{self.path_str}' is locked to {self._base!r}")
+        self._check_mutable()
+        value = self.convert(value)
+        self.check_allowed(value)
+        self._store(value)
+        # A target path may depend on a choice (entity.attributes[stat]): let the root re-bind.
+        self.instance._structure_changed()
 
-    def addStaticManipulation(self, manipulation):
-        self._staticManipulation.append(manipulation)
-        self._propertyBuffer.update()
+    def write(self, value: Any) -> None:
+        """Write a ``state`` prop (a step during play). ``range`` clamps the value."""
+        if not self.source.writable:
+            raise PropertyError(
+                f"'{self.path_str}' is a {self.source.name} property; only state properties can be written"
+            )
+        self._check_mutable()
+        value = self.convert(value)
+        if value is not None:
+            lower, upper = self.bounds()
+            value = self.datatype.clamp(value, lower, upper)
+        self._store(value)
 
-    def addManipulation(self, manipulation):
-        if manipulation not in self._manipulationTrace:
-            self._manipulationTrace.append(manipulation)
-            self._propertyBuffer.update()
+    def reset(self) -> None:
+        """Forget the chosen / written value: back to the default."""
+        self._check_mutable()
+        if not self._has_stored:
+            return
+        self._stored = None
+        self._has_stored = False
+        self._reviewed = False
+        self._property_buffer.update_and_reset_lower_list()
+        if self.source.choosable:
+            self.instance._structure_changed()
 
-    def removeManipulation(self, manipulation):
-        if manipulation in self._manipulationTrace:
-            self._manipulationTrace.remove(manipulation)
-            self._propertyBuffer.update_and_reset_lower_list()
+    def check_allowed(self, value: Any) -> None:
+        """Raise :class:`PropertyError` if ``value`` is outside ``range`` / ``options``."""
+        if value is None:
+            if not self.optional:
+                raise PropertyError(f"'{self.path_str}' is not optional")
+            return
+        lower, upper = self.bounds()
+        key = self.datatype.sort_key
+        if (lower is not None and key(value) < key(lower)) or (upper is not None and key(value) > key(upper)):
+            raise PropertyError(f"'{self.path_str}': {value!r} is outside the range [{lower}, {upper}]")
+        options = self.options()
+        if options is not None and value not in options:
+            raise PropertyError(
+                f"'{self.path_str}': {value!r} is not one of {options}{did_you_mean(str(value), options)}"
+            )
+
+    def _store(self, value: Any) -> None:
+        self._stored = value
+        self._has_stored = True
+        self._reviewed = True
+        # The value no longer comes from the default expression: forget what it read.
+        self._property_buffer.update_and_reset_lower_list()
+
+    def _check_mutable(self) -> None:
+        """Changing a value mid-resolve would make results depend on evaluation order."""
+        stack = self.instance.prop_call_stack()
+        if stack:
+            raise IllegalMutationError(
+                f"'{self.path_str}' changed while a property was resolving (stack depth {len(stack)})"
+            )
+
+    @property
+    def stored(self) -> Any:
+        return self._stored
+
+    @property
+    def has_stored(self) -> bool:
+        return self._has_stored
+
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    @property
+    def reviewed(self) -> bool:
+        """Whether the user explicitly picked this choice (even its default). Always true for other sources."""
+        return self._reviewed or not self.source.choosable
+
+    # ------------------------------------------------------------------ manipulations
+
+    def add_static_manipulation(self, manipulation: Manipulation) -> None:
+        """A kernel-internal manipulation that belongs to the property itself (survives :meth:`remove`)."""
+        if manipulation not in self._static_manipulation:
+            self._static_manipulation.append(manipulation)
+            self._property_buffer.update()
+
+    def add_manipulation(self, manipulation: Manipulation) -> None:
+        """Bind an effect. Only ``modifiable`` properties accept effects."""
+        if not self.modifiable:
+            raise PropertyError(
+                f"'{self.path_str}' is not modifiable; effect {manipulation!r} cannot target it"
+            )
+        if manipulation not in self._manipulation_trace:
+            self._manipulation_trace.append(manipulation)
+            self._property_buffer.update()
+
+    def remove_manipulation(self, manipulation: Manipulation) -> bool:
+        if manipulation in self._manipulation_trace:
+            self._manipulation_trace.remove(manipulation)
+            # forget what the removed manipulation read, too
+            self._property_buffer.update_and_reset_lower_list()
             return True
         return False
 
-    def getManipulationTrace(self):
-        combined = [*self._manipulationTrace, *self._staticManipulation]
-        return tuple(sorted(combined, key=lambda m: (m.order, m.description)))
+    def get_manipulation_trace(self) -> tuple[Manipulation, ...]:
+        """Every manipulation, in the order it is applied — the breakdown the sheet can show."""
+        combined = [*self._manipulation_trace, *self._static_manipulation]
+        return tuple(sorted(combined, key=lambda m: m.order))
 
-    def remove(self):
-        self._propertyBuffer.remove()
-        self._manipulationTrace.clear()
+    def remove(self) -> None:
+        """Detach the property from the dependency graph and drop its bound effects."""
+        self._property_buffer.remove()
+        self._manipulation_trace.clear()
 
-    def serialize(self) -> str:
-        pass # todo return the things that need to be saved
+    # ------------------------------------------------------------------ save
 
-    def deserialize(self, serialized: str):
-        pass # todo set the things that have been saved.
+    def serialize(self) -> str | None:
+        """What the save stores for this property, or ``None`` (not saved, or still the default)."""
+        if self.source.save_section is None or not self._has_stored:
+            return None
+        return self.datatype.serialize(self._stored)
 
+    def deserialize(self, serialized: Any) -> None:
+        """Restore a value written by :meth:`serialize` — with the same checks as a fresh choice / write."""
+        if self.source.choosable:
+            self.choose(serialized)
+        elif self.source.writable:
+            self.write(serialized)
+        else:
+            raise PropertyError(f"'{self.path_str}' is {self.source.name}; it is not saved")
+
+    # ------------------------------------------------------------------ misc
+
+    @property
+    def path_str(self) -> str:
+        return f"{self.instance.path_str}.{self.id}"
+
+    def __repr__(self) -> str:
+        return f"<Property {self.path_str} ({self.source.name} {self.datatype.name()})>"
