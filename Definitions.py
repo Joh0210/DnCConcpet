@@ -96,8 +96,3 @@ class GameRegistry:
 
 #: The global registry every instance looks its definitions up in.
 GAMES = GameRegistry()
-
-
-def get_data_definition_from_yml(def_id: str, game: str) -> dict:
-    """Name kept from the pseudocode: the definition entry for ``def_id`` in ``game``."""
-    return GAMES.get(game).get(def_id)

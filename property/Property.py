@@ -195,7 +195,10 @@ class Property:
             ret = self.base_value()
             self._partial_value = ret
 
-            if ret is not None:  # an absent optional value stays absent
+            if ret is not None:
+                # an absent optional value stays absent
+                # todo: should this be a special case? I mean probably one of the "manipulations" will
+                #  initialize it to something, but if not, it will stay None.
                 for manipulation in self.get_manipulation_trace():
                     ret = manipulation.apply(ret, self)
                     self._partial_value = ret
@@ -251,7 +254,7 @@ class Property:
         if self._cycle_reported:
             return
         self._cycle_reported = True
-        # todo: alternative for production (Sentry in the TS version)
+        # todo: alternative for production
         log.warning(
             "cyclic dependency detected while resolving '%s'; returning the value accumulated so far",
             self.path_str,
