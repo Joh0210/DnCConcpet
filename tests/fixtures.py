@@ -407,7 +407,7 @@ def walking(entity: Instance) -> int:
 def snapshot(root: Instance) -> dict[tuple[str, str], Any]:
     """Every resolved value in the tree, keyed by (instance path, prop id)."""
     return {
-        (instance.path_str, prop_id): prop.resolve()
+        (str(instance.path), prop_id): prop.resolve()
         for instance in root.walk()
         for prop_id, prop in instance.props.items()
     }

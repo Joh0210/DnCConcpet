@@ -407,7 +407,7 @@ class Property:
 
     @property
     def path_str(self) -> str:
-        return f"{self.instance.path_str}.{self.id}"
+        return f"{self.instance.path}.{self.id}"
 
     def __repr__(self) -> str:
         return f"<Property {self.path_str} ({self.source.name} {self.datatype.name()})>"

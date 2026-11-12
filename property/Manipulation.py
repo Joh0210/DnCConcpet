@@ -105,7 +105,7 @@ class Manipulation:
         things were added (concept §4.8).
         """
         source_id = self.source.id if self.source is not None else ""
-        source_path = self.source.path_str if self.source is not None else ""
+        source_path = str(self.source.path) if self.source is not None else ""
         return self.priority, self.operation.rank, source_id, source_path, self.index
 
     @property

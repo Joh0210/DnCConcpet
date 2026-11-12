@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from DbData import ComponentPath, ContainerPath, DbData
+from DbData import ComponentPath, DbData
 from Definitions import DEFAULT_STORE, DefinitionStore
 from InnerFunction import EvalContext, evaluate_value
 from container.Container import Container
@@ -314,17 +314,6 @@ class Instance:
         upper = self._contained.path_of(self) if self._contained is not None else None
         return ComponentPath(name=self.id, upper_path=upper)
 
-    @property
-    def path_str(self) -> str:
-        """``character/equipment:mainHand/battleaxe`` — for logs, traces and tie-breaks."""
-        path = self.path
-        ret = path.name
-        upper: ContainerPath | None = path.upper_path
-        while upper is not None:
-            ret = f"{upper.upper_path.name}/{upper.container_id}:{upper.component_key}/{ret}"
-            upper = upper.upper_path.upper_path
-        return ret
-
     # ------------------------------------------------------------------ effect binding
 
     @contextmanager
@@ -447,4 +436,4 @@ class Instance:
         return found
 
     def __repr__(self) -> str:
-        return f"<Instance {self.path_str}>"
+        return f"<Instance {self.path}>"

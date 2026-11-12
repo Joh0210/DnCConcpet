@@ -94,7 +94,7 @@ class TreeTest(unittest.TestCase):
         self.assertIs(keen.entity, char)
         self.assertIs(keen.root, char)
         self.assertIs(char.entity, char)
-        self.assertEqual(keen.path_str, "character/equipment:mainHand/dagger/enchantments:0/keen")
+        self.assertEqual(str(keen.path),"character/equipment:mainHand/dagger/enchantments:0/keen")
 
 
 class SaveTest(unittest.TestCase):

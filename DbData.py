@@ -90,6 +90,12 @@ class ComponentPath:
     name: str
     upper_path: Optional[ContainerPath] = None
 
+    def __str__(self) -> str:
+        """``character/equipment:mainHand/battleaxe`` — for logs, traces and tie-breaks."""
+        if self.upper_path is None:
+            return self.name
+        return f"{self.upper_path}/{self.name}"
+
 
 @dataclass
 class ContainerPath:
@@ -98,3 +104,6 @@ class ContainerPath:
     upper_path: ComponentPath
     container_id: Optional[str] = None
     component_key: Optional[str] = None
+
+    def __str__(self) -> str:
+        return f"{self.upper_path}/{self.container_id}:{self.component_key}"

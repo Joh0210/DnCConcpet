@@ -438,7 +438,7 @@ class Container:
 
     @property
     def path_str(self) -> str:
-        return f"{self.owner.path_str}/{self.id}"
+        return f"{self.owner.path}/{self.id}"
 
     def __repr__(self) -> str:
         return f"<Container {self.path_str} ({self.shape.name} of {self.of})>"
