@@ -1,10 +1,10 @@
 import unittest
 
-from datatype.Datatype import Datatype, common_type
-from datatype.datatypes.TypeInt import TypeInt
-from errors import DefinitionError, ExpressionError, UnsupportedOperationError
-from operation.Operation import Operation
-from operation.operations.ArithmeticOperations import AddOperation
+from engine.datatype.Datatype import Datatype, common_type
+from engine.datatype.datatypes.TypeInt import TypeInt
+from engine.errors import DefinitionError, ExpressionError, UnsupportedOperationError
+from engine.operation.Operation import Operation
+from engine.operation.operations.ArithmeticOperations import AddOperation
 
 
 class TypeCelsius(Datatype):

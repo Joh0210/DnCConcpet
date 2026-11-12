@@ -1,9 +1,9 @@
 import json
 import unittest
 
-from errors import ContainerError, DefinitionError, PropertyError
-from instance.DbData import DbData
-from instance.Instance import Instance
+from engine.errors import ContainerError, DefinitionError, PropertyError
+from engine.instance.DbData import DbData
+from engine.instance.Instance import Instance
 from tests.fixtures import TEST_GAME, attribute, make_game, new, snapshot, walking
 
 

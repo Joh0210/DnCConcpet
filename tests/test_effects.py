@@ -1,7 +1,7 @@
 """Effects across the tree: owner / entity targets, guards, the backpack boundary, re-binding."""
 import unittest
 
-from instance.Instance import Instance
+from engine.instance.Instance import Instance
 from tests.fixtures import attribute, make_game, new, snapshot, walking
 from tests.ir import ENTITY, path
 

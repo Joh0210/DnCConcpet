@@ -15,8 +15,8 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from definition.DefinitionStore import GAMES, DefinitionStore
-from instance.Instance import Instance
+from engine.definition.DefinitionStore import GAMES, DefinitionStore
+from engine.instance.Instance import Instance
 from tests.ir import ALL, ENTITY, NULL, OWNER, key, lit, op, opt, path, template
 
 LEVEL = path("level", type="int")

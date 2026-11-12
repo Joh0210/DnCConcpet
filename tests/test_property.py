@@ -1,14 +1,14 @@
 import unittest
 
-from errors import (
+from engine.errors import (
     CyclicDependencyError,
     DefinitionError,
     IllegalMutationError,
     PropertyError,
 )
-from instance.Instance import Instance
-from operation.Operation import Operation, signature
-from property.Manipulation import Manipulation
+from engine.instance.Instance import Instance
+from engine.operation.Operation import Operation, signature
+from engine.property.Manipulation import Manipulation
 from tests.fixtures import register_game
 from tests.ir import op, path
 

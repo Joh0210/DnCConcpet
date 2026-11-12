@@ -1,8 +1,8 @@
 import unittest
 
-from errors import ContainerError, IllegalMutationError
-from instance.Instance import Instance
-from operation.Operation import Operation, signature
+from engine.errors import ContainerError, IllegalMutationError
+from engine.instance.Instance import Instance
+from engine.operation.Operation import Operation, signature
 from tests.fixtures import make_game, new
 from tests.ir import op
 

@@ -6,7 +6,7 @@ Run:  python main.py        Tests:  python -m unittest
 """
 import json
 
-from instance.Instance import Instance
+from engine.instance.Instance import Instance
 from tests.fixtures import TEST_GAME
 
 

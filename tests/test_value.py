@@ -2,13 +2,13 @@
 import json
 import unittest
 
-from datatype.Datatype import Datatype
-from errors import DefinitionError, ExpressionError, UnsupportedOperationError
-from operation.Operation import Operation, signature
+from engine.datatype.Datatype import Datatype
+from engine.errors import DefinitionError, ExpressionError, UnsupportedOperationError
+from engine.operation.Operation import Operation, signature
 from tests.fixtures import CONTENT, MODEL, new, register_game, snapshot
 from tests.ir import ALL, ENTITY, NULL, OWNER, is_a, key, lit, op, opt, path, template, where
-from value.InnerFunction import EvalContext
-from value.build import build_target, build_value
+from engine.value.InnerFunction import EvalContext
+from engine.value.build import build_target, build_value
 
 LEVEL = path("level", type="int")
 

@@ -138,7 +138,7 @@ PATH          { "path": ["level"], "type": "int" }         -> PathValue
 ```
 
 Alle drei sind `InnerFunction`s (`evaluate(ctx)`, `describe()`, `type`), ein Pfad ist zusätzlich ein `TargetPath`.
-Gebaut werden sie an genau einer Stelle (`value.build.build_value`). Der `DefinitionStore` cacht sie, sodass jeder JSON-Knoten
+Gebaut werden sie an genau einer Stelle (`engine.value.build.build_value`). Der `DefinitionStore` cacht sie, sodass jeder JSON-Knoten
 pro Spiel nur einmal gebaut wird und alle Instanzen sich den Baum teilen (die Instanz kommt erst über den Kontext dazu).
 
 - **StaticValue:** der Wert wird beim Bauen einmal vom Datentyp geparst, danach nur noch zurückgegeben.
