@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Union
 
-from DbData import ContainerPath, DbData
-from InnerFunction import EvalContext, InnerFunction
+from container.Shape import ListShape, MapShape, Shape, SingleShape
 from datatype.Datatype import Datatype
 from errors import ContainerError, DefinitionError, IllegalMutationError, did_you_mean
-from property.BufferElement import BufferElement
+from instance.ComponentPath import ContainerPath
+from instance.DbData import DbData
+from property.DependencyNode import DependencyNode
+from value.InnerFunction import EvalContext, InnerFunction
 
 if TYPE_CHECKING:
-    from Instance import Instance
+    from instance.Instance import Instance
 
 #: Keys a container declaration (an entry under ``contains:``) may contain.
 SPEC_KEYS = {"of", "list", "map", "optional", "accepts", "unique", "limit", "fixed", "seed", "granted", "activates"}
@@ -18,126 +20,16 @@ SPEC_KEYS = {"of", "list", "map", "optional", "accepts", "unique", "limit", "fix
 ChildInput = Union["Instance", DbData, dict, str]
 
 
-# ---------------------------------------------------------------------- shapes
-
-
-class Shape:
-    """How a container keys and saves its children (concept §4.5: single, list or map)."""
-
-    name = ""
-
-    def new_key(self, container: Container) -> str:
-        raise ContainerError(f"'{container.path_str}' is a {self.name} container; give a key")
-
-    def check_key(self, container: Container, key: Any) -> str:
-        return str(key)
-
-    def fixed_keys(self, container: Container) -> list[str]:
-        return []
-
-    def order(self, keys) -> list[str]:
-        return list(keys)
-
-    def save(self, items: list[tuple[str, DbData]]) -> Any:
-        raise NotImplementedError
-
-    def load(self, container: Container, raw: Any) -> dict[str, DbData]:
-        raise NotImplementedError
-
-
-class SingleShape(Shape):
-    """At most one child, under the container's own id (``material``). Adding replaces it."""
-
-    name = "single"
-
-    def new_key(self, container):
-        return container.id
-
-    def check_key(self, container, key):
-        if key != container.id:
-            raise ContainerError(
-                f"'{container.path_str}' holds a single child; its only key is '{container.id}'"
-            )
-        return key
-
-    def fixed_keys(self, container):
-        return [container.id]
-
-    def save(self, items):
-        return items[0][1] if items else None
-
-    def load(self, container, raw):
-        return {} if raw is None else {container.id: DbData.coerce(raw)}
-
-
-class ListShape(Shape):
-    """Any number of children under stable numeric keys (``"0"``, ``"1"``, ...). Saved as a list."""
-
-    name = "list"
-
-    def new_key(self, container):
-        key = 0
-        while str(key) in container._children:
-            key += 1
-        return str(key)
-
-    def check_key(self, container, key):
-        if not str(key).isdigit():
-            raise ContainerError(f"'{container.path_str}': list keys are numbers, got '{key}'")
-        return str(key)
-
-    def order(self, keys):
-        return sorted(keys, key=int)
-
-    def save(self, items):
-        return [data for _, data in items]
-
-    def load(self, container, raw):
-        return {str(index): DbData.coerce(data) for index, data in enumerate(raw or [])}
-
-
-class MapShape(Shape):
-    """One child per key of a kernel enum (``attributes: {map: Attribute}``, ``equipment: {map: Slot}``)."""
-
-    name = "map"
-
-    def __init__(self, key_type: Datatype):
-        self.key_type = key_type
-
-    def check_key(self, container, key):
-        try:
-            return self.key_type.validate(key)
-        except ValueError as error:
-            raise ContainerError(f"'{container.path_str}': {error}") from error
-
-    def fixed_keys(self, container):
-        options = getattr(self.key_type, "options", None)
-        if options is None:
-            raise DefinitionError(f"'{container.path_str}': a fixed map needs an enum as key type")
-        return list(options)
-
-    def order(self, keys):
-        return sorted(keys, key=self.key_type.sort_key) if self.key_type.ordered else list(keys)
-
-    def save(self, items):
-        return {key: data for key, data in items}
-
-    def load(self, container, raw):
-        return {self.check_key(container, key): DbData.coerce(data) for key, data in (raw or {}).items()}
-
-
-# ---------------------------------------------------------------------- container
-
-
 class Container:
     """
     A named slot of an instance that holds other instances (concept §4.5):
     inventory, enchantments, the attribute map, the material.
 
-    One class for every container — its behaviour comes from the declaration
-    (an entry under ``contains:``), not from a subclass. It replaces CompContainer,
-    RegisterContainer, StaticContainer and the Single* variants; ``canAdd`` and
-    ``applicableOnWeapon`` become ``of`` / ``appliesTo`` / ``accepts``.
+    Design decision: one class for every container — its behaviour comes from
+    the declaration (an entry under ``contains:``), not from a subclass per kind
+    (CompContainer, StaticContainer, ... in the original), so content can
+    declare new containers without engine code. How children are keyed and
+    saved is the :class:`container.Shape.Shape`.
 
     ==============  ==============================================================
     ``of``          least common type; every descendant fits
@@ -177,10 +69,10 @@ class Container:
             self.shape = SingleShape()
         self.optional = bool(spec.get("optional", False))
         #: ``bool`` VALUE on the candidate ``it``; ``None`` = no extra condition.
-        self.accepts: InnerFunction | None = self._value(spec, "accepts", "bool")
+        self.accepts: InnerFunction | None = self._build_node(spec, "accepts", "bool")
         self.unique = bool(spec.get("unique", False))
         #: ``int`` VALUE; ``None`` = unlimited.
-        self.limit: InnerFunction | None = self._value(spec, "limit", "int")
+        self.limit: InnerFunction | None = self._build_node(spec, "limit", "int")
         self.fixed = bool(spec.get("fixed", False))
         self.seed: list[str] = list(spec.get("seed", []))
         self.granted = bool(spec.get("granted", False))
@@ -190,9 +82,10 @@ class Container:
 
         self._children: dict[str, Instance] = {}
         # Notified when a child is added or removed, so whatever read the container re-resolves.
-        self._buffer = BufferElement(self.owner.prop_call_stack, lambda: None)
+        self._dependency_node = DependencyNode(self.owner.resolve_stack, lambda: None)
 
-    def _value(self, spec: dict, key: str, type_name: str) -> InnerFunction | None:
+    def _build_node(self, spec: dict, key: str, type_name: str) -> InnerFunction | None:
+        """The VALUE under ``key`` of the declaration as a node of ``type_name``, or ``None`` if absent."""
         if key not in spec:
             return None
         try:
@@ -205,31 +98,32 @@ class Container:
     def get(self, key: str | None = None) -> Instance | None:
         """The child under ``key``, or ``None``. A single container needs no key."""
         key = self._default_key(key)
-        return self._buffer.read_operation(lambda: self._children.get(key))
+        return self._dependency_node.track_read(lambda: self._children.get(key))
 
     def all(self) -> list[Instance]:
         """Every child, in key order."""
-        return self._buffer.read_operation(self.all_untracked)
+        return self._dependency_node.track_read(self.all_untracked)
 
     def keys(self) -> list[str]:
-        return self._buffer.read_operation(lambda: self.shape.order(self._children))
+        return self._dependency_node.track_read(lambda: self.shape.order(self._children))
 
     def items(self) -> list[tuple[str, Instance]]:
-        return self._buffer.read_operation(
+        return self._dependency_node.track_read(
             lambda: [(key, self._children[key]) for key in self.shape.order(self._children)]
         )
 
     def __len__(self) -> int:
-        return self._buffer.read_operation(lambda: len(self._children))
+        return self._dependency_node.track_read(lambda: len(self._children))
 
     def __iter__(self):
         return iter(self.all())
 
     def all_untracked(self) -> list[Instance]:
-        """Like :meth:`all`, without registering the caller as a dependant (for the binder)."""
+        """Like :meth:`all`, without registering the caller as a dependent (for the binder)."""
         return [self._children[key] for key in self.shape.order(self._children)]
 
     def key_of(self, instance: Instance) -> str | None:
+        """The key ``instance`` sits under (untracked), or ``None``."""
         for key, child in self._children.items():
             if child is instance:
                 return key
@@ -237,6 +131,7 @@ class Container:
 
     @property
     def entity(self) -> Instance | None:
+        """The entity the owner lies in. Paths reach it via ``getattr`` (``NavigateStep``), so it looks unused."""
         return self.owner.entity
 
     # ------------------------------------------------------------------ changing
@@ -258,6 +153,7 @@ class Container:
         return self._take(self._default_key(key))
 
     def remove_instance(self, instance: Instance) -> bool:
+        """Like :meth:`remove`, by the instance instead of its key; ``False`` if it is not in here."""
         key = self.key_of(instance)
         if key is None:
             return False
@@ -271,6 +167,7 @@ class Container:
         return self._put(self.shape.new_key(self), child)
 
     def revoke(self, instance: Instance) -> bool:
+        """Take a granted child out again; ``False`` if it is not in here."""
         if not self.granted:
             raise ContainerError(f"'{self.path_str}' is not a granted container")
         key = self.key_of(instance)
@@ -283,31 +180,36 @@ class Container:
     def why_not(self, instance: Instance, key: str | None = None) -> str | None:
         """Why ``instance`` cannot go in (``None``: it can). Checks game, ``of``, ``appliesTo``, ``unique``, ``accepts``."""
         if instance.game != self.owner.game:
-            return f"'{instance.id}' belongs to game '{instance.game}', '{self.path_str}' to '{self.owner.game}'"
+            return f"'{instance.def_id}' belongs to game '{instance.game}', '{self.path_str}' to '{self.owner.game}'"
         if not instance.is_a(self.of):
-            return f"'{instance.id}' is not a '{self.of}', so it does not fit '{self.path_str}'"
+            return f"'{instance.def_id}' is not a '{self.of}', so it does not fit '{self.path_str}'"
         if instance.applies_to is not None and not any(self.owner.is_a(t) for t in instance.applies_to):
-            return f"'{instance.id}' applies only to {instance.applies_to}, not to '{self.owner.id}'"
+            return f"'{instance.def_id}' applies only to {instance.applies_to}, not to '{self.owner.def_id}'"
         if self.owner._is_within(instance):
-            return f"'{instance.id}' cannot be put inside itself"
+            return f"'{instance.def_id}' cannot be put inside itself"
         if self.unique:
             for other_key, other in self._children.items():
-                if other_key != key and other is not instance and other.id == instance.id:
-                    return f"'{self.path_str}' already holds '{instance.id}' (unique)"
+                if other_key != key and other is not instance and other.def_id == instance.def_id:
+                    return f"'{self.path_str}' already holds '{instance.def_id}' (unique)"
         if self.accepts is not None and not self.accepts.evaluate(EvalContext(this=self.owner, it=instance)):
-            return f"'{self.path_str}' does not accept '{instance.id}'"
+            return f"'{self.path_str}' does not accept '{instance.def_id}'"
         return None
 
     def can_accept(self, instance: Instance) -> bool:
+        """Whether ``instance`` could be added (see :meth:`why_not`)."""
         return self.why_not(instance) is None
 
-    def _put(self, key: str, child: ChildInput, check: bool = True) -> Instance:
+    def _put(self, key: str, child: ChildInput) -> Instance:
+        """
+        Put ``child`` under ``key`` — the one way children get in (add, grant,
+        load). A child already under ``key`` is taken out; an instance that sits
+        in another container is moved.
+        """
         self._check_mutable()
         instance = self._instantiate(child)
-        if check:
-            reason = self.why_not(instance, key)
-            if reason is not None:
-                raise ContainerError(reason)
+        reason = self.why_not(instance, key)
+        if reason is not None:
+            raise ContainerError(reason)
 
         with self.owner.batch():
             if key in self._children:
@@ -315,24 +217,26 @@ class Container:
             previous = instance._contained
             if previous is not None:  # moving: out of the old container first
                 previous._children.pop(previous.key_of(instance))
-                previous._buffer.update()
+                previous._dependency_node.invalidate()
             # Map first, then `contained`: re-binding walks the tree and has to find the child.
             self._children[key] = instance
             instance.contained = self
-            self._buffer.update()
+            self._dependency_node.invalidate()
         return instance
 
     def _take(self, key: str) -> Instance | None:
+        """Take the child under ``key`` out; it becomes the root of its own tree."""
         instance = self._children.pop(key, None)
         if instance is None:
             return None
         # Out of the map first, so the old root re-binds without it.
         with self.owner.batch():
             instance.contained = None
-            self._buffer.update()
+            self._dependency_node.invalidate()
         return instance
 
     def _instantiate(self, child: ChildInput) -> Instance:
+        """``child`` as an instance; a definition id or a save is spawned in the owner's game."""
         if isinstance(child, (str, DbData, dict)):
             return self.owner.spawn(child)
         return child
@@ -344,6 +248,7 @@ class Container:
             raise ContainerError(f"cannot {action} '{self.path_str}': it is filled only by grants")
 
     def _default_key(self, key: str | None) -> str:
+        """``key``, or the only key of a single container; other shapes need an explicit key."""
         if key is not None:
             return key
         if self.shape.name == "single":
@@ -351,7 +256,8 @@ class Container:
         raise ContainerError(f"'{self.path_str}' is a {self.shape.name} container; give a key")
 
     def _check_mutable(self) -> None:
-        stack = self.owner.prop_call_stack()
+        """Changing the structure mid-resolve would make results depend on evaluation order."""
+        stack = self.owner.resolve_stack()
         if stack:
             raise IllegalMutationError(
                 f"'{self.path_str}' changed while a property was resolving (stack depth {len(stack)})"
@@ -392,7 +298,7 @@ class Container:
                 raise ContainerError(f"'{self.path_str}' is filled by grants; it is not loaded from a save")
             return
         entries = self.shape.load(self, saved if saved is not None else self._seed_save())
-        with self.owner.batch():
+        with self.owner.batch():  # re-bind once, after every child is in place
             for key in list(self._children):
                 if key not in entries:
                     self._take(key)
@@ -406,8 +312,8 @@ class Container:
     def _load_fixed(self, saved: Any) -> None:
         """
         Fixed children are never regenerated: the save is loaded into them, so
-        nothing bound to them is lost. (The old StaticContainer regenerated them,
-        which is why the Entity's container order was load-bearing.)
+        nothing bound to them is lost. (Regenerating them, as the original did,
+        made the loading order of an entity's containers matter.)
         """
         fixed = self._fixed_entries()
         entries = self.shape.load(self, saved) if saved is not None else {}
@@ -447,13 +353,15 @@ class Container:
     # ------------------------------------------------------------------ paths
 
     def path_of(self, instance: Instance) -> ContainerPath | None:
+        """The hop from ``instance`` to the owner, for :attr:`Instance.path`; ``None`` if it is not in here."""
         key = self.key_of(instance)
         if key is None:
             return None
-        return ContainerPath(upper_path=self.owner.path, container_id=self.id, component_key=key)
+        return ContainerPath(parent=self.owner.path, container_id=self.id, key=key)
 
     @property
     def path_str(self) -> str:
+        """``character/inventory`` — for messages."""
         return f"{self.owner.path}/{self.id}"
 
     def __repr__(self) -> str:

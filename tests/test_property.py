@@ -1,13 +1,13 @@
 import unittest
 
-from Instance import Instance
-from datatype.Operation import Operation, signature
 from errors import (
     CyclicDependencyError,
     DefinitionError,
     IllegalMutationError,
     PropertyError,
 )
+from instance.Instance import Instance
+from operation.Operation import Operation, signature
 from property.Manipulation import Manipulation
 from tests.fixtures import register_game
 from tests.ir import op, path
@@ -204,7 +204,7 @@ class ManipulationTest(unittest.TestCase):
             "id": "halved",
             "props": {"x": {"type": "int", "default": 9, "modifiable": True}},
             # floor(previous / 2)
-            "effects": [{"target": x(), "transform": op("floor", op("div", path(root="previous", type="int"), 2))}],
+            "effects": [{"target": x(), "transform": op("floor", op("div", path(start="previous", type="int"), 2))}],
         })
         self.assertEqual(inst.get("x"), 4)
 

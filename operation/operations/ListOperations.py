@@ -9,14 +9,15 @@ Lists are never null (concept §4.6). Of the empty list ``sum`` / ``count`` are 
 ``avg`` are null.
 """
 from datatype.Datatype import Datatype, common_type
-from datatype.Operation import Operation
+from operation.Operation import Operation
 
 
-def _list_of(datatype: Datatype) -> Datatype:
+def _list_type(datatype: Datatype) -> Datatype:
+    """``list<T>`` for the element type ``T``."""
     return Datatype.get(f"list<{datatype.name()}>")
 
 
-def _element(types) -> Datatype | None:
+def _element_type(types) -> Datatype | None:
     """The element type of a single ``list<T>`` argument, else ``None``."""
     if len(types) == 1 and types[0].kind() == "list":
         return types[0].element
@@ -34,7 +35,7 @@ class ListOperation(Operation):
         common = common_type(*types)
         if not types or common is None:
             return None
-        return self.overload(types, _list_of(common), lambda *values: list(values))
+        return self.overload(types, _list_type(common), lambda *values: list(values))
 
     def describe(self, args):
         return f"[{', '.join(arg.describe() for arg in args)}]"
@@ -45,6 +46,7 @@ class InOperation(Operation):
 
     symbol = "in"
     precedence = 5
+    associativity = "none"  # on the comparison level (concept §4.7)
 
     def name(self) -> str:
         return "in"
@@ -62,7 +64,7 @@ class SumOperation(Operation):
 
     def generic(self, types):
         """(list<int>) -> int, (list<number>) -> number"""
-        element = _element(types)
+        element = _element_type(types)
         if element is None or not (element.kind() == "number" or element.widens_to("number")):
             return None
         return self.overload(types, element, lambda values: sum(v for v in values if v is not None))
@@ -74,7 +76,7 @@ class CountOperation(Operation):
 
     def generic(self, types):
         """(list<T>) -> int"""
-        if _element(types) is None:
+        if _element_type(types) is None:
             return None
         return self.overload(types, Datatype.get("int"), len)
 
@@ -85,19 +87,21 @@ class FirstOperation(Operation):
 
     def generic(self, types):
         """(list<T>) -> T (null when empty)"""
-        element = _element(types)
+        element = _element_type(types)
         if element is None:
             return None
         return self.overload(types, element, lambda values: values[0] if values else None)
 
 
 class _Extreme(Operation):
+    """Base of ``min`` / ``max``: over one list, or over several arguments (``max(a, b)``)."""
+
     pick = staticmethod(min)
 
     def generic(self, types):
         """(list<T>) -> T or (T, T, ...) -> T for every ordered T"""
         pick = type(self).pick
-        element = _element(types)
+        element = _element_type(types)
         if element is not None:
             if not element.ordered:
                 return None
@@ -133,7 +137,7 @@ class AvgOperation(Operation):
 
     def generic(self, types):
         """(list<int>) -> number, (list<number>) -> number"""
-        element = _element(types)
+        element = _element_type(types)
         if element is None or not (element.kind() == "number" or element.widens_to("number")):
             return None
 
@@ -150,7 +154,7 @@ class LastOperation(Operation):
 
     def generic(self, types):
         """(list<T>) -> T (null when empty)"""
-        element = _element(types)
+        element = _element_type(types)
         if element is None:
             return None
         return self.overload(types, element, lambda values: values[-1] if values else None)
@@ -163,7 +167,7 @@ class _Quantifier(Operation):
 
     def generic(self, types):
         """(list<bool>) -> bool"""
-        element = _element(types)
+        element = _element_type(types)
         if element is None or element.kind() != "bool":
             return None
         return self.overload(types, Datatype.get("bool"), lambda values: type(self).test(bool(v) for v in values))

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from InnerFunction import EvalContext, InnerFunction
 from datatype.Datatype import Datatype
 from errors import DefinitionError
+from value.InnerFunction import EvalContext, InnerFunction
 
 #: The type a bare JSON scalar gets when the slot it stands in has no type of its own.
+#: ``bool`` comes first: in Python every bool is also an int.
 _JSON_KINDS: tuple[tuple[type, str], ...] = ((bool, "bool"), (int, "int"), (float, "number"), (str, "text"))
 
 
@@ -74,7 +75,7 @@ class StaticValue(InnerFunction):
     def describe(self) -> str:
         if self.value is None:
             return "null"
-        return self.type.serialize(self.value)
+        return self.type.literal(self.value)
 
     def __repr__(self) -> str:
         return f"<StaticValue {self.describe()}: {self.type.name()}>"

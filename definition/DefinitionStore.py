@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from InnerFunction import InnerFunction
 from datatype.Datatype import Datatype
 from errors import DefinitionError, did_you_mean
-from value import build_target, build_value, check_type
+from value.InnerFunction import InnerFunction
 from value.PathValue import PathValue
+from value.build import build_target, build_value, check_type
 
 
 class DefinitionStore:
@@ -44,10 +44,12 @@ class DefinitionStore:
         self.load(entries)
 
     def load(self, entries: Iterable[dict]) -> None:
+        """Add every entry of ``entries``."""
         for entry in entries:
             self.add(entry)
 
     def add(self, entry: dict) -> None:
+        """Add one entry; its ``id`` must be new in this game."""
         def_id = entry.get("id")
         if not isinstance(def_id, str) or not def_id:
             raise DefinitionError(f"entry without an id: {entry!r}")
@@ -56,6 +58,7 @@ class DefinitionStore:
         self._entries[def_id] = entry
 
     def get(self, def_id: str) -> dict:
+        """The entry ``def_id``; an unknown id is reported with the closest match."""
         try:
             return self._entries[def_id]
         except KeyError:
@@ -73,12 +76,13 @@ class DefinitionStore:
 
     def value(self, raw: Any, expected: Datatype | None = None) -> InnerFunction:
         """
-        The node for a value of this game's JSON (see :func:`value.build_value`),
+        The node for a value of this game's JSON (see :func:`value.build.build_value`),
         built once per JSON node. A bare scalar is cheap and typed by its slot,
         so it is built every time.
         """
         if not isinstance(raw, dict):
             return build_value(raw, expected)
+        # Built without the slot's type, so every slot shares the node; the slot is checked separately.
         node = self._compile(raw, build_value)
         check_type(node, expected)
         return node
@@ -90,6 +94,7 @@ class DefinitionStore:
         return self._compile(raw, build_target)
 
     def _compile(self, raw: dict, build) -> Any:
+        """``build(raw)``, cached by the identity of the JSON node (equal JSON elsewhere is built again)."""
         cached = self._compiled.get(id(raw))
         if cached is None:
             cached = self._compiled[id(raw)] = (raw, build(raw))
@@ -113,6 +118,7 @@ class GameRegistry:
         self._stores: dict[str, DefinitionStore] = {}
 
     def register(self, store: DefinitionStore) -> DefinitionStore:
+        """Make ``store`` available under its game id. Returns it for chaining."""
         if store.game in self._stores:
             raise DefinitionError(f"game '{store.game}' is already registered")
         self._stores[store.game] = store

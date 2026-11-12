@@ -23,6 +23,9 @@ class TypeBool(Datatype):
     def serialize(self, value):
         return str(value)
 
+    def literal(self, value):
+        return "true" if value else "false"
+
     def validate(self, value):
         if isinstance(value, bool):
             return value

@@ -21,7 +21,7 @@ class Datatype(ABC):
     module in ``datatype/datatypes`` that calls :meth:`register`; no operation and
     no property has to change: generic operations (``==``, ``atLeast``,
     ``override``, ``? :``) work on it right away, typed ones raise a clear error
-    until they get an overload for it (see :class:`Operation`).
+    until they get an overload for it (see :class:`operation.Operation.Operation`).
 
     Parametrized types (``list<number>``, ``ref<weapon>``) are created on first
     use by a registered constructor (:meth:`register_constructor`) and then
@@ -58,9 +58,10 @@ class Datatype(ABC):
     @staticmethod
     def get(name: str) -> Datatype:
         """The datatype registered as ``name`` (``int``, ``Attribute``, ``list<number>``, ...)."""
-        import datatype.datatypes  # noqa: F401 — registers the built-in types on first use
+        # Imported lazily: the type modules import this one. Importing registers them.
+        import datatype.datatypes  # noqa: F401
 
-        name = name.replace(" ", "")
+        name = name.replace(" ", "")  # "list< number >" is "list<number>"
         found = Datatype._registry.get(name)
         if found is not None:
             return found
@@ -70,6 +71,7 @@ class Datatype(ABC):
 
     @staticmethod
     def _construct(name: str) -> Datatype:
+        """Build ``base<argument>`` with the registered constructor and register it, so it is built once."""
         base, argument = name[:-1].split("<", 1)
         try:
             constructor = Datatype._constructors[base]
@@ -117,6 +119,14 @@ class Datatype(ABC):
     @abstractmethod
     def serialize(self, value: Any) -> str:
         """The value as the string stored in a save (also used to show it in a text)."""
+
+    def literal(self, value: Any) -> str:
+        """
+        The value as a literal of the expression language (concept §4.7), for
+        :meth:`InnerFunction.describe`. Usually its serialized form; a type with
+        its own literal syntax overrides this (enums: ``.heavy``).
+        """
+        return self.serialize(value)
 
     @abstractmethod
     def validate(self, value: Any) -> Any:

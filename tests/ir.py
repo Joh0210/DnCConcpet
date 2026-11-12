@@ -31,13 +31,13 @@ def op(name: str, *args: Any) -> dict:
     return {"op": name, "args": list(args)}
 
 
-def path(*steps: Any, type: str | None = None, root: str | None = None) -> dict:
-    """A path; ``type`` is required where it is used as a value, ``root`` = ``it`` / ``previous`` / ..."""
+def path(*steps: Any, type: str | None = None, start: str | None = None) -> dict:
+    """A path; ``type`` is required where it is used as a value, ``start`` = ``it`` / ``previous`` / ..."""
     node: dict = {"path": list(steps)}
     if type is not None:
         node["type"] = type
-    if root is not None:
-        node["from"] = root
+    if start is not None:
+        node["from"] = start
     return node
 
 

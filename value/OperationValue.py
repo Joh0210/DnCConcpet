@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from InnerFunction import EvalContext, InnerFunction
-from datatype.Operation import Operation
 from errors import DefinitionError, ExpressionError
+from operation.Operation import Operation
+from value.InnerFunction import EvalContext, InnerFunction
 
 
 class OperationValue(InnerFunction):

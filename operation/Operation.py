@@ -7,7 +7,7 @@ from datatype.Datatype import Datatype
 from errors import DefinitionError, UnsupportedOperationError, did_you_mean
 
 if TYPE_CHECKING:
-    from InnerFunction import InnerFunction
+    from value.InnerFunction import InnerFunction
 
 
 def signature(*params: str, returns: str):
@@ -61,16 +61,16 @@ class Operation(ABC):
     ``atLeast``, ``atMost``, ``override``, ``transform``). An expression node
     (``{"op": "add", "args": [...]}``) names one by id.
 
-    **The operation is the entry point, not the datatype.** It is called with
-    any argument types and decides what it does with them, by *signature*:
+    **Design decision: the operation is the entry point, not the datatype.** It
+    is called with any argument types and decides what it does with them, by
+    *signature* — on all argument types, not only on the first one's datatype:
 
     1. a method marked ``@signature(...)`` whose parameter kinds match the
-       argument types exactly (``use_<kind>`` of old, generalized from one type
-       to all arguments),
+       argument types exactly,
     2. the same with widening (``int`` fits a ``number`` parameter),
     3. :meth:`generic` — for rules over *any* type (``==``, ``atLeast`` on every
        ordered type, ``? :``); it gets the argument types and returns an
-       :class:`Overload` or ``None`` (``use_any`` of old),
+       :class:`Overload` or ``None``,
     4. else :class:`UnsupportedOperationError`, listing what is supported.
 
     The result type comes from the overload, not from the arguments:
@@ -90,7 +90,7 @@ class Operation(ABC):
 
     _registry: ClassVar[dict[str, Operation]] = {}
     #: ``(method name, (param kinds, return type name))`` of every ``@signature`` method, base first.
-    _declared: ClassVar[list[tuple[str, tuple[tuple[str, ...], str]]]] = []
+    _signatures: ClassVar[list[tuple[str, tuple[tuple[str, ...], str]]]] = []
 
     #: Position among the effects of one priority stage; lower runs first.
     #: Compute (transform, add, mul), then clamp (atLeast, atMost), then override.
@@ -102,12 +102,20 @@ class Operation(ABC):
     #: prefix symbol, and how tightly it binds (higher = tighter; concept §4.7).
     symbol: ClassVar[str | None] = None
     precedence: ClassVar[int] = 10
+    #: Which side of an infix operator may hold the same precedence without
+    #: parentheses: ``"left"`` (``a - b - c``), ``"right"`` (``^``) or ``"none"``
+    #: (comparisons — ``a == b == c`` has no meaning, both sides are parenthesized).
+    associativity: ClassVar[str] = "left"
+    #: Combined with another operator, it must be parenthesized on both sides (``??``, concept §4.7).
+    parenthesize_when_combined: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs):
+        # Collect the @signature methods once per class: inherited ones first, so a
+        # subclass extends its base's overloads; the order is the order of resolution.
         super().__init_subclass__(**kwargs)
         own = [(name, member._signature) for name, member in vars(cls).items() if hasattr(member, "_signature")]
-        inherited = [entry for base in cls.__bases__ for entry in getattr(base, "_declared", [])]
-        cls._declared = inherited + own
+        inherited = [entry for base in cls.__bases__ for entry in getattr(base, "_signatures", [])]
+        cls._signatures = inherited + own
 
     def __init__(self) -> None:
         self._resolved: dict[tuple[Datatype, ...], Overload] = {}
@@ -116,6 +124,7 @@ class Operation(ABC):
 
     @staticmethod
     def register(operation: Operation) -> Operation:
+        """Make ``operation`` available under its :meth:`name`. Returns it for chaining."""
         name = operation.name()
         if name in Operation._registry:
             raise DefinitionError(f"operation '{name}' is registered twice")
@@ -135,6 +144,7 @@ class Operation(ABC):
 
     @staticmethod
     def names() -> list[str]:
+        """Every registered operation id."""
         Operation._load_builtins()
         return list(Operation._registry)
 
@@ -156,7 +166,8 @@ class Operation(ABC):
 
     @staticmethod
     def _load_builtins() -> None:
-        import datatype.operations  # noqa: F401 — registers the built-in operations
+        # Imported lazily: the operation modules import this one. Importing registers them.
+        import operation.operations  # noqa: F401
 
     # ------------------------------------------------------------------ resolution
 
@@ -176,10 +187,11 @@ class Operation(ABC):
         return found
 
     def _resolve(self, types: tuple[Datatype, ...]) -> Overload:
+        # Exact matches win over widened ones: (int, int) picks the int overload, not the number one.
         for widening in (False, True):
-            for method, (params, returns) in self._declared:
+            for method, (params, returns) in self._signatures:
                 if len(params) == len(types) and all(
-                    _fits(arg, param, widening) for arg, param in zip(types, params)
+                    _matches(arg, param, widening) for arg, param in zip(types, params)
                 ):
                     return Overload(self, types, Datatype.get(returns), getattr(self, method))
         found = self.generic(types)
@@ -187,13 +199,17 @@ class Operation(ABC):
             return found
         raise UnsupportedOperationError(
             f"operation '{self.name()}' does not support ({', '.join(t.name() for t in types)})"
-            f"{self._supported()}"
+            f"{self._describe_supported()}"
         )
 
     def generic(self, types: tuple[Datatype, ...]) -> Overload | None:
         """
         Fallback for argument types no ``@signature`` covers: return an
         :class:`Overload` if the operation handles ``types``, else ``None``.
+
+        The first line of an override's docstring is part of the error message
+        that lists what an operation supports — keep it a signature like
+        ``(T, T) -> T for every ordered T``.
         """
         return None
 
@@ -201,8 +217,9 @@ class Operation(ABC):
         """Helper for :meth:`generic`."""
         return Overload(self, types, returns, impl)
 
-    def _supported(self) -> str:
-        shown = [f"({', '.join(params)}) -> {returns}" for _, (params, returns) in self._declared]
+    def _describe_supported(self) -> str:
+        """``; supported: (int, int) -> int; ...`` for error messages, or an empty string."""
+        shown = [f"({', '.join(params)}) -> {returns}" for _, (params, returns) in self._signatures]
         if type(self).generic is not Operation.generic:
             shown.append((type(self).generic.__doc__ or "generic").strip().splitlines()[0])
         return f"; supported: {'; '.join(shown)}" if shown else ""
@@ -212,28 +229,40 @@ class Operation(ABC):
     def describe(self, args: Sequence[InnerFunction]) -> str:
         """How the expression language writes this operation applied to ``args``."""
         if self.symbol is not None and len(args) == 2:
-            left = _wrap(args[0], self.precedence, strict=False)
-            right = _wrap(args[1], self.precedence, strict=True)
+            left = self._operand(args[0], strict=self.associativity != "left")
+            right = self._operand(args[1], strict=self.associativity != "right")
             return f"{left} {self.symbol} {right}"
         if self.symbol is not None and len(args) == 1:
             separator = " " if self.symbol[-1].isalpha() else ""
-            return f"{self.symbol}{separator}{_wrap(args[0], self.precedence, strict=False)}"
+            return f"{self.symbol}{separator}{self._operand(args[0], strict=False)}"
         return f"{self.name()}({', '.join(arg.describe() for arg in args)})"
+
+    def _operand(self, node: InnerFunction, strict: bool) -> str:
+        """
+        ``node`` described as an operand of this operator, in parentheses where
+        concept §4.7 requires them: when it binds looser than this operator (or
+        equally, if ``strict``), or when one of the two is ``??`` and the other
+        is a different operator.
+        """
+        text = node.describe()
+        inner = node.precedence
+        if inner < self.precedence or (strict and inner == self.precedence):
+            return f"({text})"
+        child = getattr(node, "operation", None)  # only operation nodes have one
+        is_operator = inner < Operation.precedence  # atoms and calls bind tightest
+        if is_operator and child is not self and (
+            self.parenthesize_when_combined or (child is not None and child.parenthesize_when_combined)
+        ):
+            return f"({text})"
+        return text
 
     def __repr__(self) -> str:
         return f"<Operation {self.name()}>"
 
 
-def _fits(arg: Datatype, param: str, widening: bool) -> bool:
+def _matches(arg: Datatype, param: str, widening: bool) -> bool:
+    """Whether an argument of type ``arg`` fits a ``@signature`` parameter (a kind, a type name or ``any``)."""
     if param == "any" or arg.kind() == param or arg.name() == param:
         return True
     return widening and arg.widens_to(param)
 
-
-def _wrap(node: InnerFunction, precedence: int, strict: bool) -> str:
-    """``node`` described, in parentheses if it binds looser than its parent (or equally, on the right)."""
-    text = node.describe()
-    inner = node.precedence
-    if inner < precedence or (strict and inner == precedence):
-        return f"({text})"
-    return text

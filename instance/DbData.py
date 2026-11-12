@@ -1,7 +1,8 @@
+"""The save format of instances (concept §4.13)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 #: Saved content of one container, shaped like the container (concept §4.13):
 #: single → one DbData, list → a list, map → key → DbData.
@@ -54,6 +55,7 @@ class DbData:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DbData:
+        """The inverse of :meth:`to_dict`."""
         return cls(
             def_id=data["def"],
             props=dict(data.get("props", {})),
@@ -75,6 +77,7 @@ class DbData:
 
 
 def _children_to_dict(children: ChildrenData) -> Any:
+    """The JSON form of one container's saved children, keeping its shape."""
     if isinstance(children, DbData):
         return children.to_dict()
     if isinstance(children, list):
@@ -83,6 +86,10 @@ def _children_to_dict(children: ChildrenData) -> Any:
 
 
 def _children_from_dict(children: Any) -> ChildrenData:
+    """
+    The inverse of :func:`_children_to_dict`. The shape is told apart by the
+    JSON alone: a list, a single save (it has ``def``) or a map of saves.
+    """
     if isinstance(children, DbData):
         return children
     if isinstance(children, list):
@@ -90,29 +97,3 @@ def _children_from_dict(children: Any) -> ChildrenData:
     if "def" in children:  # a single child
         return DbData.from_dict(children)
     return {key: DbData.coerce(child) for key, child in children.items()}
-
-
-@dataclass
-class ComponentPath:
-    """A component's position in the entity tree, as a linked list toward the root."""
-
-    name: str
-    upper_path: Optional[ContainerPath] = None
-
-    def __str__(self) -> str:
-        """``character/equipment:mainHand/battleaxe`` — for logs, traces and tie-breaks."""
-        if self.upper_path is None:
-            return self.name
-        return f"{self.upper_path}/{self.name}"
-
-
-@dataclass
-class ContainerPath:
-    """One hop of a ComponentPath: which container of which parent component."""
-
-    upper_path: ComponentPath
-    container_id: Optional[str] = None
-    component_key: Optional[str] = None
-
-    def __str__(self) -> str:
-        return f"{self.upper_path}/{self.container_id}:{self.component_key}"

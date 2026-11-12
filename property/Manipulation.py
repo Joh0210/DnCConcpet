@@ -1,24 +1,23 @@
 """
 One effect, applied to one or more properties (concept §4.8).
 
-Replaces ``IManipulation`` / ``manipulation()`` and the manipulation half of
-``LocalModifier`` / ``PlayerModifier``: instead of a closure the effect is data —
-an operation, a value (a VALUE node), a target path, a priority, an optional
-``when`` and ``label``. Which properties it currently hits is decided by the
-root's binding (``Instance._rebind``), not by the manipulation itself.
+Design decision: an effect is data, not a closure — an operation, a value (a
+VALUE node), a target path, a priority, an optional ``when`` and ``label``. That
+keeps the content pure JSON. Which properties it currently hits is decided by
+the root's binding (``Instance._rebind``), not by the manipulation itself.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
-from InnerFunction import EvalContext, InnerFunction
 from datatype.Datatype import Datatype
-from datatype.Operation import Operation, Overload
 from errors import DefinitionError, PropertyError, UnsupportedOperationError, did_you_mean
-from value import build_value
+from operation.Operation import Operation, Overload
+from value.InnerFunction import EvalContext, InnerFunction
+from value.build import build_value
 
 if TYPE_CHECKING:
-    from Instance import Instance
+    from instance.Instance import Instance
     from property.Property import Property
     from value.PathValue import PathValue
 
@@ -30,8 +29,9 @@ PRIORITIES: dict[str, int] = {"base": 100, "normal": 500, "final": 900}
 EFFECT_KEYS = {"target", "priority", "when", "label"}
 
 
-def priority_value(priority: str | int) -> int:
-    if isinstance(priority, int) and not isinstance(priority, bool):
+def priority_number(priority: str | int) -> int:
+    """A priority as its number: a stage name from :data:`PRIORITIES`, or a number as is."""
+    if isinstance(priority, int) and not isinstance(priority, bool):  # a bool is an int in Python
         return priority
     try:
         return PRIORITIES[priority]
@@ -82,17 +82,17 @@ class Manipulation:
         self.value: InnerFunction = build_value(value)
         self.target = target
         self.source = source
-        self.priority = priority_value(priority)
+        self.priority = priority_number(priority)
         self.when: InnerFunction | None = None if when is None else build_value(when, Datatype.get("bool"))
         self.label: InnerFunction | None = None if label is None else build_value(label, Datatype.get("text"))
         self.index = index
         # prop type → (overload, assignment), resolved when bound to a prop of that type
-        self._appliers: dict[Datatype, tuple[Overload, Callable[[Any], Any]]] = {}
+        self._resolved: dict[Datatype, tuple[Overload, Callable[[Any], Any]]] = {}
 
     @classmethod
     def from_effect(cls, effect: dict, source: Instance, index: int) -> Manipulation:
         """Build the manipulation for one entry of a definition's ``effects`` list."""
-        where = f"effect #{index} of '{source.id}'"
+        where = f"effect #{index} of '{source.def_id}'"
         operations = [key for key in effect if key not in EFFECT_KEYS]
         known = Operation.effect_names()
         unknown = [key for key in operations if key not in known]
@@ -130,7 +130,7 @@ class Manipulation:
         path → effect index. The result never depends on the order in which
         things were added (concept §4.8).
         """
-        source_id = self.source.id if self.source is not None else ""
+        source_id = self.source.def_id if self.source is not None else ""
         source_path = str(self.source.path) if self.source is not None else ""
         return self.priority, self.operation.rank, source_id, source_path, self.index
 
@@ -147,10 +147,14 @@ class Manipulation:
 
     def check_target(self, prop: Property) -> None:
         """Raise :class:`PropertyError` unless this effect can change ``prop`` (its operation fits the types)."""
-        self._applier(prop)
+        self._resolve_for(prop)
 
-    def _applier(self, prop: Property) -> tuple[Overload, Callable[[Any], Any]]:
-        found = self._appliers.get(prop.datatype)
+    def _resolve_for(self, prop: Property) -> tuple[Overload, Callable[[Any], Any]]:
+        """
+        The overload of the operation for ``(prop type, value type)`` and the
+        assignment of its result to the prop — resolved once per prop type.
+        """
+        found = self._resolved.get(prop.datatype)
         if found is None:
             try:
                 overload = self.operation.resolve((prop.datatype, self.value.type))
@@ -162,7 +166,7 @@ class Manipulation:
                     f"effect {self!r} yields {overload.returns.name()}, "
                     f"'{prop.path_str}' is {prop.datatype.name()}"
                 )
-            found = self._appliers[prop.datatype] = (overload, assign)
+            found = self._resolved[prop.datatype] = (overload, assign)
         return found
 
     def is_applicable(self) -> bool:
@@ -175,7 +179,7 @@ class Manipulation:
         """The value of ``prop`` after this manipulation; ``previous`` unchanged while inert."""
         if not self.is_applicable():
             return previous
-        overload, assign = self._applier(prop)
+        overload, assign = self._resolve_for(prop)
         value = self.value.evaluate(EvalContext(this=self.source, previous=previous))
         result = assign(overload(previous, value))
         try:

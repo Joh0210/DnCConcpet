@@ -2,13 +2,13 @@
 import json
 import unittest
 
-from InnerFunction import EvalContext
 from datatype.Datatype import Datatype
-from datatype.Operation import Operation, signature
 from errors import DefinitionError, ExpressionError, UnsupportedOperationError
+from operation.Operation import Operation, signature
 from tests.fixtures import CONTENT, MODEL, new, register_game, snapshot
 from tests.ir import ALL, ENTITY, NULL, OWNER, is_a, key, lit, op, opt, path, template, where
-from value import build_target, build_value
+from value.InnerFunction import EvalContext
+from value.build import build_target, build_value
 
 LEVEL = path("level", type="int")
 
@@ -132,7 +132,7 @@ class PathValueTest(unittest.TestCase):
 
     def test_a_key_is_any_value(self):
         self.char.container("attributes").get("dex").prop("value").choose(14)
-        picked = path(root="picked", type="Attribute")  # a context name, like `args` of an action
+        picked = path(start="picked", type="Attribute")  # a context name, like `args` of an action
         node = build_value(path("attributes", key(picked), "mod", type="int"))
         self.assertEqual(node.evaluate(EvalContext(this=self.char, picked="dex")), 2)
         self.assertEqual(node.describe(), "attributes[picked].mod")
@@ -142,7 +142,7 @@ class PathValueTest(unittest.TestCase):
         inventory.add("rope")
         inventory.add("dagger")
         self.assertEqual(self.read(path("inventory", is_a("weapon"), "weight", type="list<number>")), [1])
-        heavy = where(op("gt", path("weight", root="it", type="number"), 5))
+        heavy = where(op("gt", path("weight", start="it", type="number"), 5))
         self.assertEqual(self.read(path("inventory", heavy, "weight", type="list<number>")), [10])
 
     def test_a_list_is_one_value_for_list_operations(self):
@@ -229,16 +229,46 @@ class DescribeTest(unittest.TestCase):
             "sum(enchantments[*].power) + (material?.power ?? 0)",
         )
 
+    def test_parentheses_follow_associativity(self):
+        category = path("category", start="it", type="MaterialCategory")
+        required = path("requiredMaterial", type="MaterialRequired")
+        self.assertDescribes(  # comparisons do not chain: both sides keep their parentheses
+            op("eq", op("eq", category, lit("metal", "MaterialCategory")),
+               op("eq", required, lit("metal", "MaterialRequired"))),
+            "(it.category == .metal) == (requiredMaterial == .metal)",
+        )
+        self.assertDescribes(op("lt", op("add", 1, 2), 4), "1 + 2 < 4")
+        self.assertDescribes(op("pow", 2, op("pow", 3, 2)), "2 ^ 3 ^ 2")  # ^ is right-associative
+        self.assertDescribes(op("pow", op("pow", 2, 3), 2), "(2 ^ 3) ^ 2")
+        self.assertDescribes(op("sub", op("sub", 10, 4), 1), "10 - 4 - 1")  # left-associative as before
+
+    def test_coalesce_is_parenthesized_when_combined_with_another_operator(self):
+        level = path(opt(ENTITY), "level", type="int")
+        power = op("coalesce", path(opt("material"), "power", type="number"), 0)
+        self.assertDescribes(op("coalesce", level, op("mul", 0, 2)), "entity?.level ?? (0 * 2)")
+        self.assertDescribes(op("mul", op("coalesce", level, 0), 2), "(entity?.level ?? 0) * 2")
+        self.assertDescribes(op("cond", path("magic", type="bool"), power, 1), "magic ? (material?.power ?? 0) : 1")
+        self.assertDescribes(op("coalesce", level, op("sum", path("inventory", ALL, "weight", type="list<int>"))),
+                             "entity?.level ?? sum(inventory[*].weight)")  # a call is no operator
+        self.assertDescribes(op("coalesce", op("coalesce", level, NULL), 0), "entity?.level ?? null ?? 0")
+
     def test_paths_and_templates_read_like_the_source(self):
         stat = path("stat", type="Attribute")
         self.assertDescribes(path(opt(ENTITY), "attributes", key(stat), "value", type="int"),
                              "entity?.attributes[stat].value")
-        self.assertDescribes(path("category", root="it", type="MaterialCategory"), "it.category")
-        self.assertDescribes(path(root="previous", type="int"), "previous")
+        self.assertDescribes(path("category", start="it", type="MaterialCategory"), "it.category")
+        self.assertDescribes(path(start="previous", type="int"), "previous")
         self.assertDescribes(path("attributes", key(lit("str", "Attribute"), lit("dex", "Attribute")), "advantage",
                                   type="list<int>"), "attributes[.str, .dex].advantage")
         self.assertDescribes(template("Your ", stat, " increases by ", op("add", op("mul", 2, LEVEL), 1)),
                              '"Your {stat} increases by {2 * level + 1}"')
+
+    def test_literals_are_written_in_the_expression_language(self):
+        self.assertDescribes(op("and", path("magic", type="bool"), False), "magic and false")
+        self.assertDescribes(op("add", "hello ", path("who", type="text")), "'hello ' + who")
+        self.assertDescribes("it's", r"'it\'s'")
+        self.assertDescribes(op("mul", 2.5, 2), "2.5 * 2")
+        self.assertDescribes(template("Hi ", True), '"Hi {true}"')  # text parts of a template stay inline
 
 
 class ContentAsDataTest(unittest.TestCase):

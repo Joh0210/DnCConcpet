@@ -7,11 +7,14 @@ on any two types that have a common type (``null`` fits every type, so
 import operator
 
 from datatype.Datatype import Datatype, common_type
-from datatype.Operation import Operation
+from operation.Operation import Operation
 
 
-class _Equality(Operation):
+class _EqualityComparison(Operation):
+    """Base of ``==`` / ``!=``; ``compare`` is the Python operator."""
+
     precedence = 5
+    associativity = "none"
     compare = staticmethod(operator.eq)
 
     def generic(self, types):
@@ -21,14 +24,14 @@ class _Equality(Operation):
         return self.overload(types, Datatype.get("bool"), type(self).compare)
 
 
-class EqOperation(_Equality):
+class EqOperation(_EqualityComparison):
     symbol = "=="
 
     def name(self) -> str:
         return "eq"
 
 
-class NeOperation(_Equality):
+class NeOperation(_EqualityComparison):
     symbol = "!="
     compare = staticmethod(operator.ne)
 
@@ -36,8 +39,11 @@ class NeOperation(_Equality):
         return "ne"
 
 
-class _Order(Operation):
+class _OrderComparison(Operation):
+    """Base of ``<`` ``<=`` ``>`` ``>=``; ``compare`` is applied to the ``sort_key`` of both sides."""
+
     precedence = 5
+    associativity = "none"
     compare = staticmethod(operator.lt)
 
     def generic(self, types):
@@ -49,14 +55,14 @@ class _Order(Operation):
         return self.overload(types, Datatype.get("bool"), lambda a, b: compare(key(a), key(b)))
 
 
-class LtOperation(_Order):
+class LtOperation(_OrderComparison):
     symbol = "<"
 
     def name(self) -> str:
         return "lt"
 
 
-class LeOperation(_Order):
+class LeOperation(_OrderComparison):
     symbol = "<="
     compare = staticmethod(operator.le)
 
@@ -64,7 +70,7 @@ class LeOperation(_Order):
         return "le"
 
 
-class GtOperation(_Order):
+class GtOperation(_OrderComparison):
     symbol = ">"
     compare = staticmethod(operator.gt)
 
@@ -72,7 +78,7 @@ class GtOperation(_Order):
         return "gt"
 
 
-class GeOperation(_Order):
+class GeOperation(_OrderComparison):
     symbol = ">="
     compare = staticmethod(operator.ge)
 

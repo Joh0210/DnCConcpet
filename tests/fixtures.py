@@ -15,8 +15,8 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from Definitions import GAMES, DefinitionStore
-from Instance import Instance
+from definition.DefinitionStore import GAMES, DefinitionStore
+from instance.Instance import Instance
 from tests.ir import ALL, ENTITY, NULL, OWNER, key, lit, op, opt, path, template
 
 LEVEL = path("level", type="int")
@@ -117,10 +117,10 @@ MODEL: list[dict] = [
                 "accepts": op(
                     "or",
                     op("or",
-                       op("eq", path("category", root="it", type="MaterialCategory"), lit("any", "MaterialCategory")),
+                       op("eq", path("category", start="it", type="MaterialCategory"), lit("any", "MaterialCategory")),
                        op("eq", path("requiredMaterial", type="MaterialRequired"), lit("any", "MaterialRequired"))),
                     op("eq",
-                       op("eq", path("category", root="it", type="MaterialCategory"), lit("metal", "MaterialCategory")),
+                       op("eq", path("category", start="it", type="MaterialCategory"), lit("metal", "MaterialCategory")),
                        op("eq", path("requiredMaterial", type="MaterialRequired"), lit("metal", "MaterialRequired"))),
                 ),
             },

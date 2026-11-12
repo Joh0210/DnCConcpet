@@ -1,13 +1,44 @@
 """
-Arithmetic of the expression language besides ``add`` / ``mul`` (which are also
-effects): ``-`` ``/`` ``%`` ``^``, unary ``-``, and rounding. None of these is an
-effect — a negative ``add`` or a fractional ``mul`` does that job (concept §4.8).
+Arithmetic of the expression language: ``+`` ``-`` ``*`` ``/`` ``%`` ``^``, unary
+``-``, rounding and ``clamp``. Only ``add`` and ``mul`` are effects too (they have
+a ``rank``); a negative ``add`` or a fractional ``mul`` does the job of the
+others (concept §4.8).
 """
 import math
 
 from datatype.Datatype import common_type
-from datatype.Operation import Operation, signature
 from errors import ExpressionError
+from operation.Operation import Operation, signature
+
+
+class AddOperation(Operation):
+    """
+    Sum (``+``). On bool: "or", on text: concatenation. Also an effect: a
+    negative value subtracts — effects have no ``sub`` (concept §4.8).
+    """
+
+    rank = 10
+    symbol = "+"
+    precedence = 6
+
+    def name(self) -> str:
+        return "add"
+
+    @signature("int", "int", returns="int")
+    def ints(self, a, b):
+        return a + b
+
+    @signature("number", "number", returns="number")
+    def numbers(self, a, b):
+        return a + b
+
+    @signature("bool", "bool", returns="bool")
+    def bools(self, a, b):
+        return a or b
+
+    @signature("text", "text", returns="text")
+    def texts(self, a, b):
+        return a + b
 
 
 class SubOperation(Operation):
@@ -26,6 +57,33 @@ class SubOperation(Operation):
     @signature("number", "number", returns="number")
     def numbers(self, a, b):
         return a - b
+
+
+class MulOperation(Operation):
+    """
+    Product (``*``). On bool: "and". ``int * number`` is a ``number``; as an
+    effect on an ``int`` prop the result is floored when it is assigned, so a
+    fractional factor rounds down (there is no ``div`` effect).
+    """
+
+    rank = 20
+    symbol = "*"
+    precedence = 7
+
+    def name(self) -> str:
+        return "mul"
+
+    @signature("int", "int", returns="int")
+    def ints(self, a, b):
+        return a * b
+
+    @signature("number", "number", returns="number")
+    def numbers(self, a, b):
+        return a * b
+
+    @signature("bool", "bool", returns="bool")
+    def bools(self, a, b):
+        return a and b
 
 
 class DivOperation(Operation):
@@ -67,10 +125,11 @@ class ModOperation(Operation):
 
 
 class PowOperation(Operation):
-    """Power (``^``) — a ``number``, like ``/``."""
+    """Power (``^``) — a ``number``, like ``/``. Right-associative: ``2 ^ 3 ^ 2`` is ``2 ^ (3 ^ 2)``."""
 
     symbol = "^"
     precedence = 9
+    associativity = "right"
 
     def name(self) -> str:
         return "pow"
@@ -163,6 +222,6 @@ class ClampOperation(Operation):
         return self.overload(types, common, common.clamp)
 
 
-for _operation in (SubOperation, DivOperation, ModOperation, PowOperation, NegOperation,
+for _operation in (AddOperation, SubOperation, MulOperation, DivOperation, ModOperation, PowOperation, NegOperation,
                    FloorOperation, CeilOperation, RoundOperation, AbsOperation, ClampOperation):
     Operation.register(_operation())

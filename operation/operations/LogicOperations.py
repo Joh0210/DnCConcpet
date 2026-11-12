@@ -7,7 +7,7 @@ they need. That is what makes a null check protect what follows it
 untaken branch from becoming a dependency of the value.
 """
 from datatype.Datatype import common_type
-from datatype.Operation import Operation, signature
+from operation.Operation import Operation, signature
 
 
 class NotOperation(Operation):
@@ -54,6 +54,7 @@ class CoalesceOperation(Operation):
     lazy = True
     symbol = "??"
     precedence = 1
+    parenthesize_when_combined = True  # `a ?? b * 2` is an error; precedence surprises are too likely
 
     def name(self) -> str:
         return "coalesce"
@@ -93,7 +94,7 @@ class CondOperation(Operation):
         )
 
     def describe(self, args):
-        parts = [arg.describe() if arg.precedence > self.precedence else f"({arg.describe()})" for arg in args]
+        parts = [self._operand(arg, strict=True) for arg in args]
         return f"{parts[0]} ? {parts[1]} : {parts[2]}"
 
 

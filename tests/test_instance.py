@@ -1,16 +1,16 @@
 import json
 import unittest
 
-from DbData import DbData
-from Instance import Instance
 from errors import ContainerError, DefinitionError, PropertyError
+from instance.DbData import DbData
+from instance.Instance import Instance
 from tests.fixtures import TEST_GAME, attribute, make_game, new, snapshot, walking
 
 
 class InheritanceTest(unittest.TestCase):
     def test_chain_is_walked_child_to_parent(self):
         axe = new("battleaxe")
-        self.assertEqual(axe.sub_ids, ["battleaxe", "weapon", "equipment", "item"])
+        self.assertEqual(axe.extends_chain, ["battleaxe", "weapon", "equipment", "item"])
         self.assertTrue(axe.is_a("equipment"))
         self.assertFalse(axe.is_a("armor"))
 
@@ -167,7 +167,7 @@ class GameTest(unittest.TestCase):
 
     def test_new_builds_a_fresh_instance_of_a_game(self):
         char = Instance.new("character", TEST_GAME)
-        self.assertEqual((char.id, char.game), ("character", TEST_GAME))
+        self.assertEqual((char.def_id, char.game), ("character", TEST_GAME))
         self.assertEqual(char.to_data(), new("character").to_data())
         with self.assertRaisesRegex(DefinitionError, "unknown game 'tset' — did you mean 'test'"):
             Instance.new("character", "tset")

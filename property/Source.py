@@ -1,10 +1,11 @@
 """
 Where a property's base value comes from (concept §4.4, ``source``).
 
-One small strategy per source, looked up by name. They replace the old class split
-into ``MutableProperty`` and ``StorableProperty``: that split made a value that is
-both chosen and modified by effects (``attribute.value``: choice + modifiable)
-impossible, while in the concept ``source`` and ``modifiable`` are independent.
+Design decision: one small strategy per source, looked up by name, instead of
+property subclasses (``MutableProperty`` / ``StorableProperty`` in the original).
+Subclasses made a value that is both chosen and modified by effects
+(``attribute.value``: choice + modifiable) impossible; in the concept ``source``
+and ``modifiable`` are independent.
 
 A new source is a subclass plus ``Source.register``.
 """
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 
 class Source:
+    """Where the base value comes from. One shared instance per source, registered by its :attr:`name`."""
+
     _registry: ClassVar[dict[str, Source]] = {}
 
     name: ClassVar[str] = ""

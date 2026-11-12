@@ -3,8 +3,8 @@ Text: templates (``"Your {stat} increases by {2 * level + 1}"``, concept §4.7) 
 helpers that write values the way a sheet shows them (``roman``, ``signed``, ``join``).
 """
 from datatype.Datatype import Datatype
-from datatype.Operation import Operation, signature
 from errors import ExpressionError
+from operation.Operation import Operation, signature
 
 _ROMAN = (
     (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
@@ -12,12 +12,12 @@ _ROMAN = (
 )
 
 
-def _writer(datatype: Datatype):
+def _text_writer(datatype: Datatype):
     """How a value of ``datatype`` is written into a text: text as is, anything else by ``serialize``."""
     return str if datatype.kind() == "text" else datatype.serialize
 
 
-def _number_text(value) -> str:
+def _format_number(value) -> str:
     """``2.0`` as ``2``, ``2.5`` as ``2.5``."""
     return str(int(value)) if float(value).is_integer() else str(value)
 
@@ -34,7 +34,7 @@ class ConcatOperation(Operation):
 
     def generic(self, types):
         """(any, ...) -> text"""
-        writers = [_writer(t) for t in types]
+        writers = [_text_writer(t) for t in types]
 
         def concat(*values):
             return "".join("" if value is None else write(value) for write, value in zip(writers, values))
@@ -83,7 +83,7 @@ class SignedOperation(Operation):
 
     @signature("number", returns="text")
     def of_number(self, value):
-        text = _number_text(value)
+        text = _format_number(value)
         return text if value < 0 else f"+{text}"
 
 
@@ -102,7 +102,7 @@ class JoinOperation(Operation):
             return None
         if len(types) == 2 and types[1].kind() != "text":
             return None
-        write = _writer(types[0].element)
+        write = _text_writer(types[0].element)
 
         def join(values, separator=", "):
             return separator.join(write(value) for value in values if value is not None)

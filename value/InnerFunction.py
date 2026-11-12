@@ -1,10 +1,10 @@
 """
-Schnittstellen zwischen Engine und Ausdrücken.
+Interfaces between the engine and expressions.
 
-Der Parser macht aus den YAML-Strings (``"2 * level + 1"``,
-``entity.attributes[stat].value``) einen typisierten AST und schreibt ihn in die
-JSON (concept §4.14). Die Engine parst nie selbst — sie baut aus dem JSON-AST
-1:1 Knoten und wertet sie aus. Jeder Knoten ist ein VALUE::
+The parser turns the YAML strings (``"2 * level + 1"``,
+``entity.attributes[stat].value``) into a typed AST and writes it into the JSON
+(concept §4.14). The engine never parses — it builds one node per JSON node and
+evaluates it. Every node is a VALUE::
 
     VALUE = STATIC_VALUE | OPERATION | PATH
 
@@ -12,8 +12,8 @@ JSON (concept §4.14). Die Engine parst nie selbst — sie baut aus dem JSON-AST
 - :class:`value.OperationValue.OperationValue` — ``{"op": "add", "args": [VALUE, ...]}``,
 - :class:`value.PathValue.PathValue` — ``{"path": [STEP, ...], "type": "int"}``.
 
-Alle drei sind :class:`InnerFunction`; ein Pfad ist zusätzlich ein
-:class:`TargetPath`. Gebaut werden sie von :func:`value.build_value`.
+All three are an :class:`InnerFunction`; a path is a :class:`TargetPath` as well.
+They are built by :func:`value.build.build_value`.
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from Instance import Instance
     from datatype.Datatype import Datatype
+    from instance.Instance import Instance
     from property.Property import Property
 
 
@@ -51,6 +51,7 @@ class EvalContext:
         self.extra = extra
 
     def __getattr__(self, name: str) -> Any:
+        # Only called for names that are not slots: the extra names of the context.
         try:
             return self.extra[name]
         except KeyError:
@@ -58,12 +59,6 @@ class EvalContext:
 
     def var(self, name: str) -> Any:
         """The value a path starts at: ``this``, ``it``, ``previous`` or an extra name."""
-        if name == "this":
-            return self.this
-        if name == "it":
-            return self.it
-        if name == "previous":
-            return self.previous
         return getattr(self, name)
 
     def with_it(self, it: Any) -> EvalContext:
@@ -73,15 +68,15 @@ class EvalContext:
 
 class InnerFunction(ABC):
     """
-    Quasi eine Funktion, welche immer genau auf einen Wert resolved — ein Knoten
-    des Ausdrucks-AST (ein VALUE). Sie bekommt den aktuellen Kontext übergeben
-    (``ctx.this`` ist die Instanz), kann also auf die Properties der Instanz und
-    über ``owner`` / ``entity`` auf ihre Umgebung zugreifen.
+    A function that always resolves to exactly one value — one node of the
+    expression AST (a VALUE). It gets the current context (``ctx.this`` is the
+    instance), so it can read the instance's props and, through ``owner`` /
+    ``entity``, its surroundings.
 
-    Jeder Knoten hat einen **statischen Typ** (:attr:`type`), der schon beim
-    Bauen feststeht — Operationen werden deshalb einmal beim Laden aufgelöst,
-    nicht bei jeder Auswertung. Knoten sind unveränderlich und hängen an keiner
-    Instanz: ein gebauter Baum wird von allen Instanzen einer Definition geteilt.
+    Every node has a **static type** (:attr:`type`), known when it is built — so
+    operations are resolved once when the definition loads, not on every
+    evaluation. Nodes are immutable and belong to no instance: a built tree is
+    shared by every instance of a definition.
     """
 
     #: The static type of every value this node evaluates to (``None`` only for a target-only path).
@@ -102,16 +97,13 @@ class InnerFunction(ABC):
 
 class TargetPath(ABC):
     """
-    Relevant für Auswertungen und Bestimmung von Targets bei Manipulationen und co.
-
-    Ein TargetPath ist eine Liste von Schritten, die man braucht, um vom aktuellen Punkt
-    (der Quelle des Effekts) zum Target zu kommen. Ein TargetPath führt dabei immer zu
-    Properties — zu einer (``owner.damage``) oder zu mehreren
+    Where an effect goes: the steps from the effect's source to its targets.
+    A target path always ends at properties — one (``owner.damage``) or several
     (``entity.attributes[.str, .dex].advantage``, ``entity.inventory[is weapon].weight``).
 
-    Verzweigungen sind Schritte, die aus einem Knoten mehrere machen (``[*]``,
-    mehrere Keys, Filter); der Rest des Pfads gilt dann für jeden Zweig.
-    Umgesetzt von :class:`value.PathValue.PathValue`.
+    Branching steps turn one node into several (``[*]``, several keys,
+    filters); the rest of the path applies to every branch.
+    Implemented by :class:`value.PathValue.PathValue`.
     """
 
     @abstractmethod
@@ -123,4 +115,5 @@ class TargetPath(ABC):
         """
 
     def describe(self) -> str:
+        """The path as source text, for traces and error messages."""
         return type(self).__name__

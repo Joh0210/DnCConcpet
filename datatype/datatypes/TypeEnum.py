@@ -30,6 +30,7 @@ class TypeEnum(Datatype):
 
     @classmethod
     def instance(cls):
+        """Not available: every enum is its own instance of this class, so there is no single shared one."""
         raise TypeError("TypeEnum is parametrized — use Datatype.get('<EnumName>')")
 
     def name(self) -> str:
@@ -43,6 +44,10 @@ class TypeEnum(Datatype):
 
     def serialize(self, value):
         return value
+
+    def literal(self, value):
+        # Enum literals carry a leading dot, so they never collide with a prop or a path start (concept §4.7).
+        return f".{value}"
 
     def validate(self, value):
         if value in self.options:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from InnerFunction import EvalContext, InnerFunction
 from datatype.Datatype import Datatype
 from errors import (
     CyclicDependencyError,
@@ -12,11 +11,12 @@ from errors import (
     PropertyError,
     did_you_mean,
 )
-from property.BufferElement import BufferElement
+from property.DependencyNode import DependencyNode
 from property.Source import Source
+from value.InnerFunction import EvalContext, InnerFunction
 
 if TYPE_CHECKING:
-    from Instance import Instance
+    from instance.Instance import Instance
     from property.Manipulation import Manipulation
 
 log = logging.getLogger("engine")
@@ -26,6 +26,7 @@ SPEC_KEYS = {"type", "source", "default", "derive", "modifiable", "range", "opti
 #: Keys a ``refine:`` entry may contain.
 REFINE_KEYS = {"range", "options", "default", "lock"}
 
+#: "No partial value yet" — distinct from None, which is a valid value.
 _NOTHING = object()
 
 
@@ -37,9 +38,9 @@ class Property:
 
         base (from the source) → manipulations, sorted by their order → clamp
 
-    and cached. The BufferElement records what the computation read and drops the
-    cache when any of it changes, so dependants never see a stale value and
-    nothing recomputes needlessly.
+    and cached. Its :class:`DependencyNode` records what the computation read and
+    drops the cache when any of it changes, so dependents never see a stale
+    value and nothing recomputes needlessly.
 
     Built from the declaration in the YML/JSON (``props: {weight: {type: number, ...}}``):
 
@@ -54,7 +55,7 @@ class Property:
     Every value from the definition is a node (:class:`InnerFunction`) — a
     literal, a path or an operation are the same thing here, built by the
     game's store and checked against the prop's type when the definition loads
-    (:meth:`_value`). The property only ever calls :meth:`evaluate` on them.
+    (:meth:`_build_node`). The property only ever calls :meth:`evaluate` on them.
     Values from outside the definitions — a choice, a write, a parameter, a
     save — are plain data and go through the datatype (:meth:`parse_input`).
     """
@@ -79,56 +80,38 @@ class Property:
         self.optional: bool = bool(spec.get("optional", False))
 
         # Base value (const / derived) or default (choice / state / param): a node, None while open.
-        self._has_base: bool = "derive" in spec or "default" in spec
         self._base: InnerFunction | None = (
-            self._value(spec["derive"] if "derive" in spec else spec["default"], "base value")
-            if self._has_base else None
+            self._build_node(spec["derive"] if "derive" in spec else spec["default"], "base value")
+            if "derive" in spec or "default" in spec else None
         )
-        self._range = self._check_bounds(spec.get("range"), "range")
-        self._options = self._check_options(spec.get("options"))
-        self._clamp = self._check_bounds(spec.get("clamp"), "clamp")
+        self._range = self._build_bounds(spec.get("range"), "range")
+        self._options = self._build_options(spec.get("options"))
+        self._clamp = self._build_bounds(spec.get("clamp"), "clamp")
         self._locked = False
 
         # The value picked by the user (choice) or written in play (state). It
         # replaces the *base* value, not the result: effects still apply on top
         # (attribute.value is chosen *and* raised by enchantments).
         self._stored: Any = None
-        self._has_stored = False
-        """
-        Indicates that the user has set the property explicitly and it didn't just
-        use the default value. (Only relevant for choice properties.)
-        """
+        self._has_stored = False  # separate flag: None is a valid stored value
+        # The user picked this choice explicitly, even if it equals the default.
         self._reviewed = False
 
-        """
-        Effects bound to this property by the root of its tree (Instance._rebind).
-        Bound and unbound as the structure changes.
-        """
-        self._manipulation_trace: list[Manipulation] = []
-        """
-        Kernel-internal manipulations that are part of the property itself. They
-        are permanent and survive remove().
-        """
-        self._static_manipulation: list[Manipulation] = []
+        # Effects bound by the root of the tree (Instance._rebind); they come and go with the structure.
+        self._bound_manipulations: list[Manipulation] = []
+        # Kernel-internal manipulations that belong to the property itself; re-binding never removes them.
+        self._static_manipulations: list[Manipulation] = []
 
         self._cached_value: Any = None
         self._has_cache = False
 
-        """
-        Guards against cyclic dependencies while calc is running.
-        """
+        # Cycle handling (see calc): set while calc runs, and the value accumulated so far.
         self._resolving = False
-        """
-        Value accumulated so far, returned when a cycle re-enters calc.
-        """
         self._partial_value: Any = _NOTHING
         self._cycle_reported = False
 
-        """
-        Notifies properties that depend on this one when its value changes, and
-        clears this property's own cache when a dependency changes.
-        """
-        self._property_buffer = BufferElement(self.instance.prop_call_stack, self._on_update)
+        # Invalidates dependent values when this one changes, and clears the cache when an input changes.
+        self._dependency_node = DependencyNode(self.instance.resolve_stack, self._clear_cache)
 
     # ------------------------------------------------------------------ definition
 
@@ -136,9 +119,8 @@ class Property:
         """A ``set`` in a definition: the base value (const) or the default (choice / state / param)."""
         if not self.source.settable:
             raise DefinitionError(f"'{self.path_str}' is {self.source.name}; it cannot be set")
-        self._base = self._value(value, "value")
-        self._has_base = True
-        self._property_buffer.update()
+        self._base = self._build_node(value, "value")
+        self._dependency_node.invalidate()
 
     def refine(self, spec: dict) -> None:
         """A ``refine`` in a definition: narrow ``range`` / ``options``, change ``default``, ``lock`` a choice."""
@@ -149,64 +131,72 @@ class Property:
                 f"refine of '{self.path_str}': unknown key '{key}'{did_you_mean(key, REFINE_KEYS)}"
             )
         if "range" in spec:
-            self._range = self._check_bounds(spec["range"], "range")
+            self._range = self._build_bounds(spec["range"], "range")
         if "options" in spec:
-            self._options = self._check_options(spec["options"])
+            self._options = self._build_options(spec["options"])
         if "default" in spec:
             self.adjust(spec["default"])
         if "lock" in spec:
             if not self.source.choosable:
                 raise DefinitionError(f"'{self.path_str}' is {self.source.name}; only a choice can be locked")
-            self._base = self._value(spec["lock"], "lock")
-            self._has_base = True
+            self._base = self._build_node(spec["lock"], "lock")
             self._locked = True
-        self._property_buffer.update()
+        self._dependency_node.invalidate()
 
     def is_open(self) -> bool:
         """Declared without a value — allowed only on abstract entries."""
-        return not self._has_base and not self.optional and self.source.requires_value
+        return self._base is None and not self.optional and self.source.requires_value
 
-    def _value(self, raw: Any, what: str, expected: Datatype | None = None) -> InnerFunction:
+    def _build_node(self, raw: Any, what: str, expected: Datatype | None = None) -> InnerFunction:
         """A value of the definition as a node of the prop's type (``expected``), shared through the store."""
         try:
             return self.instance.store.value(raw, expected or self.datatype)
         except DefinitionError as error:
             raise DefinitionError(f"prop '{self.id}': {what}: {error}") from None
 
-    def _check_bounds(self, bounds: Any, key: str) -> list[InnerFunction] | None:
+    def _build_bounds(self, bounds: Any, key: str) -> list[InnerFunction] | None:
+        """``[min, max]`` of ``range`` / ``clamp`` as nodes; only ordered types have bounds."""
         if bounds is None:
             return None
         if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
             raise DefinitionError(f"prop '{self.id}': '{key}' must be [min, max] (null = unbounded)")
         if not self.datatype.ordered:
             raise DefinitionError(f"prop '{self.id}': type '{self.datatype.name()}' has no order, '{key}' makes no sense")
-        return [self._value(bound, f"{key} bound") for bound in bounds]
+        return [self._build_node(bound, f"{key} bound") for bound in bounds]
 
-    def _check_options(self, options: Any) -> list[InnerFunction] | InnerFunction | None:
+    def _build_options(self, options: Any) -> list[InnerFunction] | InnerFunction | None:
         """A list of values, or one value of type ``list<T>`` (``DamageType[where ...]``)."""
         if options is None:
             return None
         if isinstance(options, (list, tuple)):
-            return [self._value(option, "option") for option in options]
-        return self._value(options, "options", Datatype.get(f"list<{self.datatype.name()}>"))
+            return [self._build_node(option, "option") for option in options]
+        return self._build_node(options, "options", Datatype.get(f"list<{self.datatype.name()}>"))
 
     # ------------------------------------------------------------------ reading
 
     def resolve(self) -> Any:
-        """The current value. Whoever is resolving right now becomes a dependant (see BufferElement)."""
-        return self._property_buffer.read_operation(self._cached_calc)
+        """The current value. Whoever is resolving right now becomes a dependent (see DependencyNode)."""
+        return self._dependency_node.track_read(self._cached_calc)
 
     def _cached_calc(self) -> Any:
-        if not self._has_cache or self._property_buffer.should_update:
+        if not self._has_cache or self._dependency_node.is_stale:
             self._cached_value = self.calc()
             self._has_cache = True
         return self._cached_value
 
-    def _on_update(self) -> None:
+    def _clear_cache(self) -> None:
         self._cached_value = None
         self._has_cache = False
 
     def calc(self) -> Any:
+        """
+        Compute the value: base → every manipulation in order → clamp.
+
+        A cycle re-enters this method while it runs. Through an effect (``a``
+        adds ``b``, ``b`` adds ``a``) there is a sensible answer — the value
+        accumulated so far — so it is returned with a warning. A cycle through
+        the base value has none and raises :class:`CyclicDependencyError`.
+        """
         if self._resolving:
             if self._partial_value is _NOTHING:
                 raise CyclicDependencyError(
@@ -281,12 +271,14 @@ class Property:
         return [self.datatype.validate(option) for option in self._options.evaluate(ctx)]
 
     def _apply_clamp(self, value: Any) -> Any:
+        """``clamp`` holds after every effect (unlike ``range``, which only checks choices and writes)."""
         if self._clamp is None:
             return value
         lower, upper = (self.evaluate(bound, "clamp bound") for bound in self._clamp)
         return self.datatype.clamp(value, lower, upper)
 
     def _report_cycle(self) -> None:
+        """Warn once per property about an effect cycle."""
         if self._cycle_reported:
             return
         self._cycle_reported = True
@@ -337,9 +329,9 @@ class Property:
         self._stored = None
         self._has_stored = False
         self._reviewed = False
-        self._property_buffer.update_and_reset_lower_list()
+        self._dependency_node.reset_dependencies()
         if self.source.choosable:
-            self.instance._structure_changed()
+            self.instance._structure_changed()  # a target path may depend on the choice (see choose)
 
     def check_allowed(self, value: Any) -> None:
         """Raise :class:`PropertyError` if ``value`` is outside ``range`` / ``options``."""
@@ -362,11 +354,11 @@ class Property:
         self._has_stored = True
         self._reviewed = True
         # The value no longer comes from the default expression: forget what it read.
-        self._property_buffer.update_and_reset_lower_list()
+        self._dependency_node.reset_dependencies()
 
     def _check_mutable(self) -> None:
         """Changing a value mid-resolve would make results depend on evaluation order."""
-        stack = self.instance.prop_call_stack()
+        stack = self.instance.resolve_stack()
         if stack:
             raise IllegalMutationError(
                 f"'{self.path_str}' changed while a property was resolving (stack depth {len(stack)})"
@@ -374,6 +366,7 @@ class Property:
 
     @property
     def stored(self) -> Any:
+        """The chosen / written value; only meaningful while :attr:`has_stored`."""
         return self._stored
 
     @property
@@ -382,6 +375,7 @@ class Property:
 
     @property
     def locked(self) -> bool:
+        """A ``refine: {lock: ...}`` fixed this choice in the definition."""
         return self._locked
 
     @property
@@ -392,11 +386,11 @@ class Property:
     # ------------------------------------------------------------------ manipulations
 
     def add_static_manipulation(self, manipulation: Manipulation) -> None:
-        """A kernel-internal manipulation that belongs to the property itself (survives :meth:`remove`)."""
+        """A kernel-internal manipulation that belongs to the property itself (never removed by re-binding)."""
         manipulation.check_target(self)
-        if manipulation not in self._static_manipulation:
-            self._static_manipulation.append(manipulation)
-            self._property_buffer.update()
+        if manipulation not in self._static_manipulations:
+            self._static_manipulations.append(manipulation)
+            self._dependency_node.invalidate()
 
     def add_manipulation(self, manipulation: Manipulation) -> None:
         """
@@ -408,27 +402,23 @@ class Property:
                 f"'{self.path_str}' is not modifiable; effect {manipulation!r} cannot target it"
             )
         manipulation.check_target(self)
-        if manipulation not in self._manipulation_trace:
-            self._manipulation_trace.append(manipulation)
-            self._property_buffer.update()
+        if manipulation not in self._bound_manipulations:
+            self._bound_manipulations.append(manipulation)
+            self._dependency_node.invalidate()
 
     def remove_manipulation(self, manipulation: Manipulation) -> bool:
-        if manipulation in self._manipulation_trace:
-            self._manipulation_trace.remove(manipulation)
-            # forget what the removed manipulation read, too
-            self._property_buffer.update_and_reset_lower_list()
+        """Unbind an effect; ``False`` if it was not bound."""
+        if manipulation in self._bound_manipulations:
+            self._bound_manipulations.remove(manipulation)
+            # Forget what the removed manipulation read, too.
+            self._dependency_node.reset_dependencies()
             return True
         return False
 
     def get_manipulation_trace(self) -> tuple[Manipulation, ...]:
         """Every manipulation, in the order it is applied — the breakdown the sheet can show."""
-        combined = [*self._manipulation_trace, *self._static_manipulation]
+        combined = [*self._bound_manipulations, *self._static_manipulations]
         return tuple(sorted(combined, key=lambda m: m.order))
-
-    def remove(self) -> None:
-        """Detach the property from the dependency graph and drop its bound effects."""
-        self._property_buffer.remove()
-        self._manipulation_trace.clear()
 
     # ------------------------------------------------------------------ save
 
@@ -454,6 +444,7 @@ class Property:
 
     @property
     def path_str(self) -> str:
+        """``character/attributes:str/attribute.value`` — for messages and traces."""
         return f"{self.instance.path}.{self.id}"
 
     def __repr__(self) -> str:

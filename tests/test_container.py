@@ -1,10 +1,10 @@
 import unittest
 
-from datatype.Operation import Operation, signature
 from errors import ContainerError, IllegalMutationError
+from instance.Instance import Instance
+from operation.Operation import Operation, signature
 from tests.fixtures import make_game, new
 from tests.ir import op
-from Instance import Instance
 
 
 class GreedyOperation(Operation):
@@ -128,7 +128,7 @@ class AcceptanceTest(unittest.TestCase):
 class SeedTest(unittest.TestCase):
     def test_new_instances_start_with_the_seed(self):
         conditions = new("character").container("conditions")
-        self.assertEqual([c.id for c in conditions.all()], ["overloaded"])
+        self.assertEqual([c.def_id for c in conditions.all()], ["overloaded"])
 
     def test_a_removed_seed_stays_removed_after_loading(self):
         char = new("character")

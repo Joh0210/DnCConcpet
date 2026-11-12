@@ -24,7 +24,7 @@ class TypeRef(Datatype):
         raise ValueError(f"{self.name()} values cannot be read from text yet")
 
     def serialize(self, value):
-        return value.id
+        return value.def_id
 
     def validate(self, value):
         is_a = getattr(value, "is_a", None)

@@ -13,6 +13,12 @@ class TypeText(Datatype):
     def serialize(self, value):
         return value
 
+    def literal(self, value):
+        # Single quotes, as inside templates (``"{join(list, ' and ')}"``). The concept does not fix
+        # an escape syntax yet; a backslash is assumed — align with the parser once it exists.
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+
     def validate(self, value):
         if not isinstance(value, str):
             raise ValueError(f"expected text, got {value!r}")

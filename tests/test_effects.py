@@ -1,7 +1,7 @@
 """Effects across the tree: owner / entity targets, guards, the backpack boundary, re-binding."""
 import unittest
 
-from Instance import Instance
+from instance.Instance import Instance
 from tests.fixtures import attribute, make_game, new, snapshot, walking
 from tests.ir import ENTITY, path
 
@@ -117,7 +117,7 @@ class GuardTest(unittest.TestCase):
 
         field = char.container("conditions").add("anti-magic-field")
         self.assertEqual(dagger.get("damage"), 5)
-        flaming = [m for m in dagger.prop("damage").get_manipulation_trace() if m.source.id == "flaming"][0]
+        flaming = [m for m in dagger.prop("damage").get_manipulation_trace() if m.source.def_id == "flaming"][0]
         self.assertFalse(flaming.is_applicable())  # still bound, but inert
 
         char.container("conditions").remove_instance(field)
