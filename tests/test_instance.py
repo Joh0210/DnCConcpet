@@ -4,7 +4,7 @@ import unittest
 from engine.errors import ContainerError, DefinitionError, PropertyError
 from engine.instance.DbData import DbData
 from engine.instance.Instance import Instance
-from tests.fixtures import TEST_GAME, attribute, make_game, new, snapshot, walking
+from tests.fixtures import TEST_GAME, attribute, make_game, new, snapshot, walking, without_uids
 
 
 class InheritanceTest(unittest.TestCase):
@@ -93,7 +93,7 @@ class TreeTest(unittest.TestCase):
         self.assertIs(keen.entity, char)
         self.assertIs(keen.root, char)
         self.assertIs(char.entity, char)
-        self.assertEqual(str(keen.path),"character/equipment:mainHand/dagger/enchantments:0/keen")
+        self.assertEqual(str(keen.path), f"character/equipment:mainHand/dagger/enchantments:{keen.uid}/keen")
 
 
 class SaveTest(unittest.TestCase):
@@ -114,7 +114,7 @@ class SaveTest(unittest.TestCase):
     def test_a_fresh_instance_saves_only_its_seeded_containers(self):
         self.assertEqual(
             new("character").to_data().to_dict(),
-            {"game": TEST_GAME, "def": "character", "children": {"conditions": [{"def": "overloaded"}]}},
+            {"game": TEST_GAME, "def": "character", "children": {"conditions": [{"def": "overloaded", "uid": "1"}]}},
         )
 
     def test_round_trip_through_json_restores_every_value(self):
@@ -131,7 +131,9 @@ class SaveTest(unittest.TestCase):
         data = self.build_character().to_data()
         self.assertEqual(data.props, {"level": "5"})
         self.assertEqual(data.children["attributes"], {"str": DbData("attribute", props={"value": "14"})})
-        self.assertEqual(data.children["inventory"], [DbData("rope", props={"stack": "3"})])
+        [rope] = data.children["inventory"]
+        self.assertEqual((rope.def_id, rope.props), ("rope", {"stack": "3"}))
+        self.assertIsNotNone(rope.uid)  # list children carry their identity
 
     def test_unknown_container_in_a_save_is_reported(self):
         with self.assertRaisesRegex(ContainerError, "did you mean 'inventory'"):
@@ -198,10 +200,12 @@ class LoadTest(unittest.TestCase):
 
         char.prop("level").choose(7)
         strength.prop("value").choose(8)
-        char.container("inventory").get("0").prop("stack").write(9)
+        inventory = char.container("inventory")
+        inventory.get(inventory.keys()[0]).prop("stack").write(9)
         char.container("inventory").add("dagger")
-        char.container("feats").remove("0")
-        char.container("conditions").remove("0")
+        for container_id in ("feats", "conditions"):
+            container = char.container(container_id)
+            container.remove(container.keys()[0])
         char.container("equipment").remove("mainHand")
         self.assertNotEqual(char.to_data(), saved)
 
@@ -214,7 +218,8 @@ class LoadTest(unittest.TestCase):
     def test_loading_a_bare_id_resets_to_the_definition(self):
         char = SaveTest().build_character()
         char.load("character")
-        self.assertEqual(char.to_data(), new("character").to_data())
+        # The seed comes back as a new instance with a new uid (uids are never reused).
+        self.assertEqual(without_uids(char.to_data()), without_uids(new("character").to_data()))
         self.assertEqual(snapshot(char), snapshot(new("character")))
 
     def test_a_bad_save_is_rejected_before_anything_changes(self):

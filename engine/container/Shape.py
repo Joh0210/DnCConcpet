@@ -19,10 +19,6 @@ class Shape:
 
     name = ""
 
-    def new_key(self, container: Container) -> str:
-        """The key for a child added without one."""
-        raise ContainerError(f"'{container.path_str}' is a {self.name} container; give a key")
-
     def check_key(self, container: Container, key: Any) -> str:
         """``key`` normalized, or :class:`ContainerError` if this shape has no such key."""
         return str(key)
@@ -39,8 +35,11 @@ class Shape:
         """``(key, child save)`` pairs in the JSON form of this shape (concept §4.13)."""
         raise NotImplementedError
 
-    def load(self, container: Container, raw: Any) -> dict[str, DbData]:
-        """The inverse of :meth:`save`: key → child save."""
+    def load(self, container: Container, raw: Any) -> list[tuple[str | None, DbData]]:
+        """
+        The inverse of :meth:`save`: ``(key, child save)`` pairs. A list child's
+        key is its uid, ``None`` if the save has none (it gets one when it is put in).
+        """
         raise NotImplementedError
 
 
@@ -48,9 +47,6 @@ class SingleShape(Shape):
     """At most one child, under the container's own id (``material``). Adding replaces it."""
 
     name = "single"
-
-    def new_key(self, container):
-        return container.id
 
     def check_key(self, container, key):
         if key != container.id:
@@ -66,33 +62,38 @@ class SingleShape(Shape):
         return items[0][1] if items else None
 
     def load(self, container, raw):
-        return {} if raw is None else {container.id: DbData.coerce(raw)}
+        return [] if raw is None else [(container.id, DbData.coerce(raw))]
 
 
 class ListShape(Shape):
-    """Any number of children under stable numeric keys (``"0"``, ``"1"``, ...). Saved as a list."""
+    """
+    Any number of children, keyed by their uid (``Instance.uid``), saved as a list.
+
+    Design decision: the key is the child's identity, not its position or the
+    lowest free number. A removed child's key is never handed out again, so a
+    reference to it (``inventory:7``) finds nothing instead of a newer item, and
+    the key survives saving and loading. (Entries of a ``fixed`` list are the
+    exception: they have no uid and are keyed by their seed position.)
+    """
 
     name = "list"
 
-    def new_key(self, container):
-        key = 0  # the lowest free number, so keys stay small and stable
-        while str(key) in container._children:
-            key += 1
-        return str(key)
-
-    def check_key(self, container, key):
-        if not str(key).isdigit():
-            raise ContainerError(f"'{container.path_str}': list keys are numbers, got '{key}'")
-        return str(key)
-
     def order(self, keys):
-        return sorted(keys, key=int)
+        # Numeric uids in the order they were handed out; anything hand-written after them.
+        return sorted(keys, key=lambda key: (0, int(key), "") if key.isdigit() else (1, 0, key))
 
     def save(self, items):
         return [data for _, data in items]
 
     def load(self, container, raw):
-        return {str(index): DbData.coerce(data) for index, data in enumerate(raw or [])}
+        pairs: list[tuple[str | None, DbData]] = []
+        seen: set[str] = set()
+        for data in map(DbData.coerce, raw or []):
+            uid = data.uid if data.uid not in seen else None  # a duplicated uid gets a new one
+            if uid is not None:
+                seen.add(uid)
+            pairs.append((uid, data))
+        return pairs
 
 
 class MapShape(Shape):
@@ -122,4 +123,4 @@ class MapShape(Shape):
         return {key: data for key, data in items}
 
     def load(self, container, raw):
-        return {self.check_key(container, key): DbData.coerce(data) for key, data in (raw or {}).items()}
+        return [(self.check_key(container, key), DbData.coerce(data)) for key, data in (raw or {}).items()]

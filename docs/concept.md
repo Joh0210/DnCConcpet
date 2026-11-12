@@ -1,8 +1,5 @@
 # Content-as-data rules engine — concept
 
-Design for a rewrite of the rules engine (Rust or Go). The spike in this folder
-([README.md](README.md)) tested it against the hardest existing content.
-
 ## 1. Idea
 
 Today every item, spell or enchantment is a subclass of `ComponentDefinition`.
@@ -407,6 +404,14 @@ a computed value, so evaluation needs no fixpoint loop and always terminates. Th
 validator enforces this. (Something like Overloaded stays attached and uses
 `active` instead.)
 
+**Targets** follow the same idea. Effects are re-bound after structural changes
+and choices only, so a target path may read only `const`, `choice` and `param`
+values that no effect changes — directly or through what they are computed
+from. `entity.attributes[stat]` with `stat` a choice is fine. A key that is a
+`state` value, or a filter on a modifiable value (`[where it.weight > 5]`), is
+not: the binding would go stale when the value changes, or depend on the
+bindings themselves. In values (not targets), every path may read anything.
+
 ### 4.11 Events and steps
 
 Effects are continuous; some things happen once. Those are **steps**, triggered
@@ -449,11 +454,12 @@ A save stores only what the definitions cannot know:
 
 ```yaml
 def: battleaxe
+uid: "2"
 props: { stack: 1 }
 children:
-  material: { def: shadow, props: { level: 2 } }
+  material: { def: shadow, uid: "3", props: { level: 2 } }
   enchantments:
-    - { def: elemental-weapon-power, props: { level: 3, dmgType: fire } }
+    - { def: elemental-weapon-power, uid: "4", props: { level: 3, dmgType: fire } }
 ```
 
 `props` holds the picked `choice` values and the changed `state` values; which
@@ -461,6 +467,21 @@ of the two a prop is comes from its definition, so the save does not repeat it.
 Everything else is rebuilt from the definitions. The validator can check saves
 too (unknown def, choice out of range) — the hook for migrations when content
 changes.
+
+**Identity (`uid`).** Every instance carries a `uid` that is unique within its
+tree — except the entries of `fixed` containers, which are addressed by their
+key (`attributes.dex`) and never move.
+
+- A list child's key *is* its uid (`inventory:7`), not its position, so a
+  reference stays valid while other children come and go.
+- The uid survives moves (inventory → main hand), saving and loading.
+- New uids count up from the highest one the tree has seen; a uid is never
+  reused while the tree lives. A stale reference (a client that has not seen a
+  removal yet) finds nothing instead of the wrong item.
+- Handing out uids is deterministic: two engines that apply the same changes
+  (browser preview, server) hand out the same uids.
+- A child that joins a tree keeps its uid if it is free there and gets a new one
+  otherwise. A save without uids (hand-written, a `seed`) gets them on load.
 
 ### 4.14 Expressions in the JSON
 
@@ -561,13 +582,26 @@ own signatures.
 - Values are computed lazily and cached. The engine records which values each
   computation read and invalidates exactly those when an input changes — like
   today's dependency buffer, but derived from the AST instead of wired by hand.
+  The inputs are recorded afresh on every computation, so a branch no longer
+  taken (`flag ? a : b`) or a removed child stops being an input.
 - Expressions arrive as typed ASTs (§4.14). Their operations are resolved by
   type when an entry loads, and their nodes are built once and shared by every
   instance. Evaluating an expression is a short tree walk, and only a changed
   input makes it run again.
 - Grant inputs are tracked the same way.
 - Cycles (A's effect reads B, B's effect reads A) are caught by the validator
-  where paths are static, and by a runtime guard where filters make them dynamic.
+  where paths are static, and by a runtime check where filters make them
+  dynamic. A cycle is always an error — through a base value as well as through
+  an effect. There is no fallback value: "the value so far" would depend on
+  which of the two was read first, so the browser preview and the server could
+  compute different results.
+- **Binding is all or nothing.** After a structural change or a choice, every
+  effect target is resolved and every new binding is checked before any is
+  applied. If one fails (wrong type, target not modifiable, a target that reads
+  a value it must not, §4.10), no binding changes, the change that caused it
+  (an `add`, a `choose`, a `load`) is taken back, and the error is raised. These
+  are content errors the validator should catch first; the engine must still
+  never be left half-bound.
 
 ## 6. Validation
 
@@ -588,7 +622,8 @@ own signatures.
 - **expressions:** syntax incl. parentheses and the `??` rule; known functions;
   operand and argument types (`add` only combines compatible types)
 - **order:** warning on colliding `transform` / `override`
-- **stratification** (§4.10)
+- **cycles:** no value depends on itself, through its base value or an effect (§5)
+- **stratification** of grants and targets (§4.10)
 
 The ~420-line prototype ([verify.mjs](verify.mjs)) already covers most of it.
 Missing: a real expression parser (types, parentheses, `??` rule), absent

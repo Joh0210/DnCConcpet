@@ -34,7 +34,20 @@ class IllegalMutationError(EngineError):
 
 
 class CyclicDependencyError(EngineError):
-    """A property's base value depends on itself, so there is no value to fall back to."""
+    """A property depends on itself — through its base value or through an effect.
+
+    Always an error: any fallback value would depend on which property was read
+    first, so two engines (browser preview, server) could compute different results.
+    """
+
+
+class BindingError(PropertyError):
+    """Effects could not be bound after a structural change (wrong type, target not
+    modifiable, a target path that reads a value it must not).
+
+    Binding is all or nothing: when this is raised, no binding has changed, and a
+    single ``add`` / ``choose`` / ``load`` has been rolled back.
+    """
 
 
 class UnsupportedOperationError(DefinitionError, TypeError):

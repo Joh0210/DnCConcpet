@@ -1,9 +1,10 @@
 """Effects across the tree: owner / entity targets, guards, the backpack boundary, re-binding."""
 import unittest
 
+from engine.errors import BindingError
 from engine.instance.Instance import Instance
-from tests.fixtures import attribute, make_game, new, snapshot, walking
-from tests.ir import ENTITY, path
+from tests.fixtures import attribute, make_game, new, register_game, snapshot, walking
+from tests.ir import ENTITY, OWNER, key, lit, path
 
 
 class OwnerEffectTest(unittest.TestCase):
@@ -13,7 +14,7 @@ class OwnerEffectTest(unittest.TestCase):
         self.assertEqual(dagger.get("damage"), 5)
         keen.prop("level").choose(3)
         self.assertEqual(dagger.get("damage"), 7)
-        dagger.container("enchantments").remove("0")
+        dagger.container("enchantments").remove(keen.uid)
         self.assertEqual(dagger.get("damage"), 4)
         self.assertEqual(keen.prop("level").resolve(), 3)  # the removed enchantment keeps its choice
 
@@ -182,6 +183,73 @@ class DeterminismTest(unittest.TestCase):
 
         loaded = Instance(char.to_data())
         self.assertEqual(snapshot(loaded), snapshot(char))
+
+
+#: A board with cells keyed by attribute; tools on it change a cell's ``x``.
+#: A ``soft`` cell's x is modifiable, a ``hard`` cell's is not.
+BOARD = [
+    {"id": "board", "contains": {"cells": {"of": "cell", "map": "Attribute"}, "tools": {"of": "tool-base", "list": True}}},
+    {"id": "cell", "abstract": True},
+    {"id": "soft", "extends": "cell", "props": {"x": {"type": "int", "default": 0, "modifiable": True}}},
+    {"id": "hard", "extends": "cell", "props": {"x": {"type": "int", "default": 0}}},
+    {"id": "tool-base", "abstract": True},
+    {   # owner.cells[which].x += 1
+        "id": "tool", "extends": "tool-base",
+        "props": {"which": {"type": "Attribute", "source": "choice", "default": "str"}},
+        "effects": [{"target": path(OWNER, "cells", key(path("which", type="Attribute")), "x"), "add": 1}],
+    },
+    {   # the tool's own effect binds, the second one cannot (dex is hard)
+        "id": "bad-tool", "extends": "tool",
+        "effects": [{"target": path(OWNER, "cells", key(lit("dex", "Attribute")), "x"), "add": 1}],
+    },
+    {   # the target key is a state value: writing it would not re-bind
+        "id": "stateful-tool", "extends": "tool-base",
+        "props": {"which": {"type": "Attribute", "source": "state", "default": "str"}},
+        "effects": [{"target": path(OWNER, "cells", key(path("which", type="Attribute")), "x"), "add": 1}],
+    },
+]
+
+
+class BindingSafetyTest(unittest.TestCase):
+    def setUp(self):
+        self.board = Instance.new("board", register_game(*BOARD))
+        cells = self.board.container("cells")
+        self.soft = cells.add("soft", "str")
+        self.hard = cells.add("hard", "dex")
+
+    def test_an_add_that_cannot_be_bound_is_rolled_back(self):
+        tools = self.board.container("tools")
+        with self.assertRaisesRegex(BindingError, "not modifiable"):
+            tools.add("bad-tool")
+        self.assertEqual(len(tools), 0)
+        self.assertEqual(self.soft.get("x"), 0)  # no effect of the refused tool stayed bound
+        tools.add("tool")  # the tree still works
+        self.assertEqual(self.soft.get("x"), 1)
+
+    def test_a_choice_that_cannot_be_bound_is_taken_back(self):
+        tool = self.board.container("tools").add("tool")
+        self.assertEqual(self.soft.get("x"), 1)
+        with self.assertRaisesRegex(BindingError, "not modifiable"):
+            tool.prop("which").choose("dex")
+        self.assertEqual(tool.get("which"), "str")
+        self.assertEqual((self.soft.get("x"), self.hard.get("x")), (1, 0))
+
+    def test_a_load_that_cannot_be_bound_reverts_a_live_instance(self):
+        self.board.container("tools").add("tool")
+        before = self.board.to_data()
+        broken = before.to_dict()
+        broken["children"]["tools"] = [{"def": "bad-tool"}]
+        with self.assertRaises(BindingError):
+            self.board.load(broken)
+        self.assertEqual(self.board.to_data(), before)
+        # load rebuilds non-fixed children, so read the cell anew
+        self.assertEqual(self.board.container("cells").get("str").get("x"), 1)
+
+    def test_a_target_may_not_read_a_state_value(self):
+        tools = self.board.container("tools")
+        with self.assertRaisesRegex(BindingError, "which is a state value"):
+            tools.add("stateful-tool")
+        self.assertEqual(len(tools), 0)
 
 
 if __name__ == "__main__":

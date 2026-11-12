@@ -149,6 +149,14 @@ class Manipulation:
         """Raise :class:`PropertyError` unless this effect can change ``prop`` (its operation fits the types)."""
         self._resolve_for(prop)
 
+    def why_not(self, prop: Property) -> str | None:
+        """Why this effect cannot change ``prop`` (its operation does not fit the types), or ``None``."""
+        try:
+            self._resolve_for(prop)
+        except PropertyError as error:
+            return str(error)
+        return None
+
     def _resolve_for(self, prop: Property) -> tuple[Overload, Callable[[Any], Any]]:
         """
         The overload of the operation for ``(prop type, value type)`` and the

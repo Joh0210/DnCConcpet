@@ -25,16 +25,44 @@ Operation.register(GreedyOperation())
 
 
 class ShapeTest(unittest.TestCase):
-    def test_list_uses_the_lowest_free_numeric_key(self):
+    def test_list_children_are_keyed_by_a_uid_that_is_never_reused(self):
         char = new("character")
         inventory = char.container("inventory")
         first = inventory.add("rope")
-        inventory.add("dagger")
-        self.assertEqual(inventory.keys(), ["0", "1"])
-        inventory.remove("0")
+        second = inventory.add("dagger")
+        self.assertEqual(inventory.keys(), [first.uid, second.uid])
+        inventory.remove(first.uid)
         self.assertIsNone(first.contained)
-        inventory.add("rope")
-        self.assertEqual(inventory.keys(), ["0", "1"])
+        third = inventory.add("rope")
+        # A stale reference to the removed rope must find nothing, not the new one.
+        self.assertNotEqual(third.uid, first.uid)
+        self.assertIsNone(inventory.get(first.uid))
+        self.assertEqual(inventory.keys(), [second.uid, third.uid])
+
+    def test_a_list_takes_no_explicit_key(self):
+        with self.assertRaisesRegex(ContainerError, "keys are the children's uids"):
+            new("character").container("inventory").add("rope", "7")
+
+    def test_uids_survive_save_load_and_moves(self):
+        char = new("character")
+        rope = char.container("inventory").add("rope")
+        dagger = char.container("inventory").add("dagger")
+        loaded = Instance(char.to_data())
+        self.assertEqual(loaded.container("inventory").keys(), [rope.uid, dagger.uid])
+        self.assertEqual(loaded.find(dagger.uid).def_id, "dagger")
+        char.container("equipment").add(dagger, "mainHand")  # moving keeps the identity
+        self.assertEqual(dagger.uid, loaded.find(dagger.uid).uid)
+        self.assertIs(char.find(dagger.uid), dagger)
+
+    def test_a_subtree_joining_a_tree_gets_uids_unique_there(self):
+        char = new("character")
+        taken = {instance.uid for instance in char.walk() if instance.uid}
+        axe = new("battleaxe")  # a tree of its own; its enchantments got uids there
+        axe.container("enchantments").add("keen")
+        char.container("inventory").add(axe)
+        uids = [instance.uid for instance in char.walk() if instance.uid]
+        self.assertEqual(len(uids), len(set(uids)))
+        self.assertTrue(taken <= set(uids))
 
     def test_single_replaces_its_child(self):
         axe = new("battleaxe")
@@ -132,7 +160,8 @@ class SeedTest(unittest.TestCase):
 
     def test_a_removed_seed_stays_removed_after_loading(self):
         char = new("character")
-        char.container("conditions").remove("0")
+        conditions = char.container("conditions")
+        conditions.remove(conditions.keys()[0])
         loaded = Instance(char.to_data())
         self.assertEqual(len(loaded.container("conditions")), 0)
 
@@ -147,7 +176,7 @@ class ObserverTest(unittest.TestCase):
         self.assertEqual(char.get("carryWeight"), 30)
         char.container("equipment").add("dagger", "mainHand")
         self.assertEqual(char.get("carryWeight"), 31)
-        char.container("inventory").remove("0")
+        char.container("inventory").remove_instance(rope)
         self.assertEqual(char.get("carryWeight"), 1)
 
     def test_changing_a_container_during_a_resolve_is_blocked(self):

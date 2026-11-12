@@ -35,6 +35,9 @@ class DbData:
     props: dict[str, Any] = field(default_factory=dict)
     children: dict[str, ChildrenData] = field(default_factory=dict)
     game: str | None = None
+    #: The instance's identity in its tree (``Instance.uid``); ``None`` for entries of
+    #: fixed containers and for a save that has never been in a tree (it gets one when added).
+    uid: str | None = None
 
     def is_empty(self) -> bool:
         """Nothing beyond the definition id — the instance is exactly its definition."""
@@ -44,6 +47,8 @@ class DbData:
         """JSON-compatible dict with the keys of concept §4.13; empty sections are left out."""
         result: dict[str, Any] = {} if self.game is None else {"game": self.game}
         result["def"] = self.def_id
+        if self.uid is not None:
+            result["uid"] = self.uid
         if self.props:
             result["props"] = dict(self.props)
         if self.children:
@@ -64,6 +69,7 @@ class DbData:
                 for container_id, children in data.get("children", {}).items()
             },
             game=data.get("game"),
+            uid=None if data.get("uid") is None else str(data["uid"]),
         )
 
     @classmethod

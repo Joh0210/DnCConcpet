@@ -22,13 +22,17 @@ class DependencyNode:
         self,
         get_resolve_stack: Callable[[], list[DependencyNode]],
         on_invalidate: Callable[[], None],
+        owner: object = None,
     ) -> None:
         """
         :param get_resolve_stack: returns the resolve stack shared by every node
             of one instance tree (kept by its root).
         :param on_invalidate: runs when this node becomes stale — a property
             clears its cached value here.
+        :param owner: what the node belongs to (a property, container or
+            instance) — lets the binder see *what* a target path read.
         """
+        self.owner = owner
         #: Nodes that read this one — invalidated when this one changes.
         self._dependents: set[DependencyNode] = set()
         #: Nodes this one read while computing — forgotten when its inputs are reset.
@@ -62,6 +66,11 @@ class DependencyNode:
         if reentrant:
             result = compute()
         else:
+            if not self._up_to_date:
+                # About to compute afresh: forget what the last computation read. Otherwise a
+                # branch no longer taken (`flag ? a : b`) or a removed child would stay an
+                # input forever — needless recomputes, and removed instances never freed.
+                self._forget_dependencies()
             stack.append(self)
             try:
                 result = compute()
@@ -87,10 +96,25 @@ class DependencyNode:
         no longer comes from those inputs (a value was chosen, an effect was
         unbound). Its dependents are kept.
         """
-        for dependency in list(self._dependencies):
+        self._forget_dependencies()
+        self.invalidate()
+
+    def dependencies_closure(self) -> list[DependencyNode]:
+        """Every node this one read, directly or through the nodes it read (as of their last computation)."""
+        seen: set[DependencyNode] = set()
+        pending = list(self._dependencies)
+        while pending:
+            node = pending.pop()
+            if node not in seen:
+                seen.add(node)
+                pending.extend(node._dependencies)
+        return list(seen)
+
+    def _forget_dependencies(self) -> None:
+        """Unlink this node from everything it read (both directions)."""
+        for dependency in self._dependencies:
             dependency._remove_dependent(self)
         self._dependencies = set()
-        self.invalidate()
 
     def _add_dependency(self, node: DependencyNode) -> None:
         """Record that this node read ``node`` while computing."""

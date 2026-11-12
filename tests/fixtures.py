@@ -16,6 +16,7 @@ import itertools
 from typing import Any
 
 from engine.definition.DefinitionStore import GAMES, DefinitionStore
+from engine.instance.DbData import DbData
 from engine.instance.Instance import Instance
 from tests.ir import ALL, ENTITY, NULL, OWNER, key, lit, op, opt, path, template
 
@@ -345,9 +346,35 @@ def walking(entity: Instance) -> int:
 
 
 def snapshot(root: Instance) -> dict[tuple[str, str], Any]:
-    """Every resolved value in the tree, keyed by (instance path, prop id)."""
+    """
+    Every resolved value in the tree, keyed by (position, prop id). The position
+    names list children by their place, not their uid, so two trees built the same
+    way compare equal even if they handed out different uids.
+    """
     return {
-        (str(instance.path), prop_id): prop.resolve()
+        (position(instance), prop_id): prop.resolve()
         for instance in root.walk()
         for prop_id, prop in instance.props.items()
     }
+
+
+def position(instance: Instance) -> str:
+    """Like ``str(instance.path)``, with list children numbered by their place instead of their uid."""
+    container = instance._contained
+    if container is None:
+        return instance.def_id
+    key = container.key_of(instance)
+    if container.keyed_by_uid:
+        key = str(container.all_untracked().index(instance))
+    return f"{position(container.owner)}/{container.id}:{key}/{instance.def_id}"
+
+
+def without_uids(data: DbData) -> dict:
+    """The JSON form of a save, without uids — what two equally built trees have in common."""
+    def strip(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {key: strip(value) for key, value in node.items() if key != "uid"}
+        if isinstance(node, list):
+            return [strip(value) for value in node]
+        return node
+    return strip(data.to_dict())

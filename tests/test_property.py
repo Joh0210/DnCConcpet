@@ -9,7 +9,7 @@ from engine.errors import (
 from engine.instance.Instance import Instance
 from engine.operation.Operation import Operation, signature
 from engine.property.Manipulation import Manipulation
-from tests.fixtures import register_game
+from tests.fixtures import new, register_game
 from tests.ir import op, path
 
 LEVEL = path("level", type="int")
@@ -282,21 +282,54 @@ class ObserverTest(unittest.TestCase):
                 },
             }).get("a")
 
-    def test_cycle_through_effects_returns_the_partial_value_and_warns(self):
-        inst = build({
+    def test_cycle_through_effects_raises_whichever_value_is_read_first(self):
+        loop = {
             "id": "loop",
             "props": {
                 "a": {"type": "int", "default": 1, "modifiable": True},
-                "b": {"type": "int", "default": 1, "modifiable": True},
+                "b": {"type": "int", "default": 10, "modifiable": True},
             },
             "effects": [
                 {"target": path("a"), "add": path("b", type="int")},
                 {"target": path("b"), "add": path("a", type="int")},
             ],
+        }
+        game = register_game(loop)
+        # A fallback ("the value so far") would give a = 12 or a = 11 depending on the read order.
+        for first in ("a", "b"):
+            with self.subTest(first=first), self.assertRaisesRegex(CyclicDependencyError, "while computing its effects"):
+                Instance.new("loop", game).get(first)
+
+
+class DependencyCleanupTest(unittest.TestCase):
+    def test_a_branch_no_longer_taken_is_no_longer_an_input(self):
+        inst = build({
+            "id": "switch",
+            "props": {
+                "flag": {"type": "bool", "source": "choice", "default": True},
+                "a": {"type": "int", "source": "choice", "default": 1},
+                "b": {"type": "int", "source": "choice", "default": 2},
+                # flag ? a : b
+                "x": {"type": "int", "derive": op("cond", path("flag", type="bool"),
+                                                   path("a", type="int"), path("b", type="int"))},
+            },
         })
-        with self.assertLogs("engine", "WARNING") as logs:
-            self.assertEqual(inst.get("a"), 3)  # b sees a's partial value 1
-        self.assertIn("cyclic dependency", logs.output[0])
+        self.assertEqual(inst.get("x"), 1)
+        inst.prop("flag").choose(False)
+        self.assertEqual(inst.get("x"), 2)
+        inputs = {node.owner for node in inst.prop("x")._dependency_node._dependencies}
+        self.assertNotIn(inst.prop("a"), inputs)
+        self.assertEqual(inputs, {inst.prop("flag"), inst.prop("b")})
+
+    def test_a_removed_child_is_no_longer_an_input(self):
+        char = new("character")
+        rope = char.container("inventory").add("rope")
+        self.assertEqual(char.get("carryWeight"), 10)
+        char.container("inventory").remove_instance(rope)
+        self.assertEqual(char.get("carryWeight"), 0)
+        inputs = {node.owner for node in char.prop("carryWeight")._dependency_node.dependencies_closure()}
+        self.assertNotIn(rope.prop("weight"), inputs)
+        self.assertFalse(rope.prop("weight")._dependency_node._dependents)
 
     def test_changing_a_value_during_a_resolve_is_blocked(self):
         inst = build({

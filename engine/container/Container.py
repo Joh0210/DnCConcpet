@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Union
 
 from engine.container.Shape import ListShape, MapShape, Shape, SingleShape
 from engine.datatype.Datatype import Datatype
-from engine.errors import ContainerError, DefinitionError, IllegalMutationError, did_you_mean
+from engine.errors import BindingError, ContainerError, DefinitionError, IllegalMutationError, did_you_mean
 from engine.instance.ComponentPath import ContainerPath
 from engine.instance.DbData import DbData
 from engine.property.DependencyNode import DependencyNode
@@ -82,7 +82,7 @@ class Container:
 
         self._children: dict[str, Instance] = {}
         # Notified when a child is added or removed, so whatever read the container re-resolves.
-        self._dependency_node = DependencyNode(self.owner.resolve_stack, lambda: None)
+        self._dependency_node = DependencyNode(self.owner.resolve_stack, lambda: None, owner=self)
 
     def _build_node(self, spec: dict, key: str, type_name: str) -> InnerFunction | None:
         """The VALUE under ``key`` of the declaration as a node of ``type_name``, or ``None`` if absent."""
@@ -143,7 +143,11 @@ class Container:
         an instance, its saved form or a definition id. Returns the instance.
         """
         self._refuse_if_managed("add to")
-        key = self.shape.new_key(self) if key is None else self.shape.check_key(self, key)
+        if self.keyed_by_uid:
+            if key is not None:
+                raise ContainerError(f"'{self.path_str}' is a list; its keys are the children's uids, give none")
+        else:
+            key = self._default_key(key) if key is None else self.shape.check_key(self, key)
         return self._put(key, child)
 
     def remove(self, key: str | None = None) -> Instance | None:
@@ -164,7 +168,7 @@ class Container:
         """Put a child into a ``granted`` container — the way grants fill it (concept §4.10)."""
         if not self.granted:
             raise ContainerError(f"'{self.path_str}' is not a granted container")
-        return self._put(self.shape.new_key(self), child)
+        return self._put(None if self.keyed_by_uid else self._default_key(None), child)
 
     def revoke(self, instance: Instance) -> bool:
         """Take a granted child out again; ``False`` if it is not in here."""
@@ -199,11 +203,21 @@ class Container:
         """Whether ``instance`` could be added (see :meth:`why_not`)."""
         return self.why_not(instance) is None
 
-    def _put(self, key: str, child: ChildInput) -> Instance:
+    @property
+    def keyed_by_uid(self) -> bool:
+        """A (non-fixed) list: its children's keys are their uids."""
+        return self.shape.name == "list" and not self.fixed
+
+    def _put(self, key: str | None, child: ChildInput) -> Instance:
         """
         Put ``child`` under ``key`` — the one way children get in (add, grant,
         load). A child already under ``key`` is taken out; an instance that sits
-        in another container is moved.
+        in another container is moved. In a list, ``key`` is the uid the save
+        gave the child, or ``None``.
+
+        All or nothing: if the effects of the changed tree cannot be bound
+        (:class:`BindingError`), the change is rolled back before the error is
+        raised — unless an enclosing :meth:`Instance.batch` will bind later.
         """
         self._check_mutable()
         instance = self._instantiate(child)
@@ -211,18 +225,56 @@ class Container:
         if reason is not None:
             raise ContainerError(reason)
 
-        with self.owner.batch():
-            if key in self._children:
-                self._take(key)
-            previous = instance._contained
-            if previous is not None:  # moving: out of the old container first
-                previous._children.pop(previous.key_of(instance))
-                previous._dependency_node.invalidate()
-            # Map first, then `contained`: re-binding walks the tree and has to find the child.
-            self._children[key] = instance
-            instance.contained = self
-            self._dependency_node.invalidate()
+        outermost = self.owner.root._batch_depth == 0
+        previous = instance._contained
+        previous_key = previous.key_of(instance) if previous is not None else None
+        replaced = self._children.get(key) if key is not None else None
+        if replaced is instance:
+            replaced = None
+        try:
+            with self.owner.batch():
+                if replaced is not None:
+                    self._take(key)
+                self._attach(instance, key)
+        except BindingError:
+            if outermost:
+                self._undo_put(instance, previous, previous_key, replaced, key)
+            raise
         return instance
+
+    def _attach(self, instance: Instance, key: str | None) -> None:
+        """Move ``instance`` (and what lies below it) into this container under ``key``."""
+        self.owner.root._claim_uids(instance, include_root=not self.fixed)
+        if self.keyed_by_uid:
+            key = instance.uid
+        elif key is None:
+            key = self._default_key(None)
+        previous = instance._contained
+        if previous is not None:  # moving: out of the old container first
+            previous._children.pop(previous.key_of(instance))
+            previous._dependency_node.invalidate()
+        # Map first, then `contained`: re-binding walks the tree and has to find the child.
+        self._children[key] = instance
+        instance.contained = self
+        self._dependency_node.invalidate()
+
+    def _undo_put(
+        self,
+        instance: Instance,
+        previous: Container | None,
+        previous_key: str | None,
+        replaced: Instance | None,
+        key: str | None,
+    ) -> None:
+        """Take back a failed :meth:`_put`: everything goes back where it was, and the tree is bound again."""
+        with self.owner.batch():
+            own_key = self.key_of(instance)
+            if own_key is not None:
+                self._take(own_key)
+            if previous is not None:
+                previous._attach(instance, previous_key)
+            if replaced is not None and replaced._contained is None:
+                self._attach(replaced, key)
 
     def _take(self, key: str) -> Instance | None:
         """Take the child under ``key`` out; it becomes the root of its own tree."""
@@ -298,11 +350,12 @@ class Container:
                 raise ContainerError(f"'{self.path_str}' is filled by grants; it is not loaded from a save")
             return
         entries = self.shape.load(self, saved if saved is not None else self._seed_save())
+        kept = {key for key, _ in entries if key is not None}
         with self.owner.batch():  # re-bind once, after every child is in place
             for key in list(self._children):
-                if key not in entries:
+                if key not in kept:
                     self._take(key)
-            for key, data in entries.items():
+            for key, data in entries:
                 self._put(key, data)
 
     def _seed_save(self) -> Any:
@@ -316,7 +369,11 @@ class Container:
         made the loading order of an entity's containers matter.)
         """
         fixed = self._fixed_entries()
-        entries = self.shape.load(self, saved) if saved is not None else {}
+        pairs = self.shape.load(self, saved) if saved is not None else []
+        if self.shape.name == "list":  # fixed list entries have no uid: they are keyed by position
+            entries = {str(index): data for index, (_, data) in enumerate(pairs)}
+        else:
+            entries = dict(pairs)
         for key, data in entries.items():
             if key not in fixed:
                 raise ContainerError(f"'{self.path_str}' has no fixed entry '{key}'{did_you_mean(key, fixed)}")

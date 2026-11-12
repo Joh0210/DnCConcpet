@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any
 
 from engine.datatype.Datatype import Datatype
 from engine.errors import (
+    BindingError,
     CyclicDependencyError,
     DefinitionError,
     IllegalMutationError,
@@ -19,15 +19,10 @@ if TYPE_CHECKING:
     from engine.instance.Instance import Instance
     from engine.property.Manipulation import Manipulation
 
-log = logging.getLogger("engine")
-
 #: Keys a property declaration (an entry under ``props:``) may contain.
 SPEC_KEYS = {"type", "source", "default", "derive", "modifiable", "range", "options", "clamp", "optional"}
 #: Keys a ``refine:`` entry may contain.
 REFINE_KEYS = {"range", "options", "default", "lock"}
-
-#: "No partial value yet" — distinct from None, which is a valid value.
-_NOTHING = object()
 
 
 class Property:
@@ -105,13 +100,11 @@ class Property:
         self._cached_value: Any = None
         self._has_cache = False
 
-        # Cycle handling (see calc): set while calc runs, and the value accumulated so far.
-        self._resolving = False
-        self._partial_value: Any = _NOTHING
-        self._cycle_reported = False
+        # Cycle detection (see calc): what calc is computing right now, or None.
+        self._resolving: str | None = None
 
         # Invalidates dependent values when this one changes, and clears the cache when an input changes.
-        self._dependency_node = DependencyNode(self.instance.resolve_stack, self._clear_cache)
+        self._dependency_node = DependencyNode(self.instance.resolve_stack, self._clear_cache, owner=self)
 
     # ------------------------------------------------------------------ definition
 
@@ -192,23 +185,21 @@ class Property:
         """
         Compute the value: base → every manipulation in order → clamp.
 
-        A cycle re-enters this method while it runs. Through an effect (``a``
-        adds ``b``, ``b`` adds ``a``) there is a sensible answer — the value
-        accumulated so far — so it is returned with a warning. A cycle through
-        the base value has none and raises :class:`CyclicDependencyError`.
+        A cycle re-enters this method while it runs and raises
+        :class:`CyclicDependencyError` — through the base value as well as
+        through an effect (``a`` adds ``b``, ``b`` adds ``a``). Returning the
+        value accumulated so far would make the result depend on which of the
+        two was read first, so the browser preview and the server could disagree.
         """
-        if self._resolving:
-            if self._partial_value is _NOTHING:
-                raise CyclicDependencyError(
-                    f"'{self.path_str}' depends on itself while computing its base value"
-                )
-            self._report_cycle()
-            return self._partial_value
+        if self._resolving is not None:
+            raise CyclicDependencyError(
+                f"'{self.path_str}' depends on itself (cycle while computing its {self._resolving})"
+            )
 
-        self._resolving = True
+        self._resolving = "base value"
         try:
             ret = self.base_value()
-            self._partial_value = ret
+            self._resolving = "effects"
 
             if ret is not None:
                 # an absent optional value stays absent
@@ -216,13 +207,11 @@ class Property:
                 #  initialize it to something, but if not, it will stay None.
                 for manipulation in self.get_manipulation_trace():
                     ret = manipulation.apply(ret, self)
-                    self._partial_value = ret
                 ret = self._apply_clamp(ret)
 
             return ret
         finally:
-            self._resolving = False
-            self._partial_value = _NOTHING
+            self._resolving = None
 
     def base_value(self) -> Any:
         """The value before any effect, as the source defines it."""
@@ -277,17 +266,6 @@ class Property:
         lower, upper = (self.evaluate(bound, "clamp bound") for bound in self._clamp)
         return self.datatype.clamp(value, lower, upper)
 
-    def _report_cycle(self) -> None:
-        """Warn once per property about an effect cycle."""
-        if self._cycle_reported:
-            return
-        self._cycle_reported = True
-        # todo: alternative for production
-        log.warning(
-            "cyclic dependency detected while resolving '%s'; returning the value accumulated so far",
-            self.path_str,
-        )
-
     # ------------------------------------------------------------------ writing
 
     def choose(self, value: Any) -> None:
@@ -304,9 +282,16 @@ class Property:
         self._check_mutable()
         value = self.parse_input(value)
         self.check_allowed(value)
+        before = (self._stored, self._has_stored, self._reviewed)
         self._store(value)
         # A target path may depend on a choice (entity.attributes[stat]): let the root re-bind.
-        self.instance._structure_changed()
+        try:
+            self.instance._structure_changed()
+        except BindingError:
+            # The new choice cannot be bound (no binding changed): take it back.
+            self._stored, self._has_stored, self._reviewed = before
+            self._dependency_node.reset_dependencies()
+            raise
 
     def write(self, value: Any) -> None:
         """Write a ``state`` prop (a step during play). ``range`` clamps the value."""
@@ -392,16 +377,20 @@ class Property:
             self._static_manipulations.append(manipulation)
             self._dependency_node.invalidate()
 
+    def why_not_manipulation(self, manipulation: Manipulation) -> str | None:
+        """Why ``manipulation`` cannot be bound to this prop, or ``None`` — checked before anything is bound."""
+        if not self.modifiable:
+            return f"'{self.path_str}' is not modifiable; effect {manipulation!r} cannot target it"
+        return manipulation.why_not(self)
+
     def add_manipulation(self, manipulation: Manipulation) -> None:
         """
         Bind an effect. Only ``modifiable`` properties accept effects, and only
         effects whose operation works on this prop's type and whose result fits it.
         """
-        if not self.modifiable:
-            raise PropertyError(
-                f"'{self.path_str}' is not modifiable; effect {manipulation!r} cannot target it"
-            )
-        manipulation.check_target(self)
+        reason = self.why_not_manipulation(manipulation)
+        if reason is not None:
+            raise PropertyError(reason)
         if manipulation not in self._bound_manipulations:
             self._bound_manipulations.append(manipulation)
             self._dependency_node.invalidate()

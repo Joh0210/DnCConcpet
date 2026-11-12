@@ -7,7 +7,14 @@ from typing import Any, Iterator
 from engine.container.Container import Container
 from engine.datatype.Datatype import Datatype
 from engine.definition.DefinitionStore import GAMES, DefinitionStore
-from engine.errors import ContainerError, DefinitionError, PropertyError, did_you_mean
+from engine.errors import (
+    BindingError,
+    ContainerError,
+    DefinitionError,
+    EngineError,
+    PropertyError,
+    did_you_mean,
+)
 from engine.instance.ComponentPath import ComponentPath
 from engine.instance.DbData import DbData
 from engine.property.DependencyNode import DependencyNode
@@ -95,15 +102,26 @@ class Instance:
         self._manipulations: list[Manipulation] = []
 
         # Notified when `contained` changes, so values that read owner / entity re-resolve.
-        self._dependency_node = DependencyNode(self.resolve_stack, lambda: None)
+        self._dependency_node = DependencyNode(self.resolve_stack, lambda: None, owner=self)
 
         # Effect bindings and batching (see batch) — used only while this instance is the root of its tree.
         self._bindings: dict[Manipulation, set[Property]] = {}
         self._batch_depth = 0
         self._rebind_pending = False
 
+        #: Identity of this instance within its tree — stable across moves, saves and loads, never
+        #: reused while the tree lives (see _claim_uids). ``None`` for entries of ``fixed``
+        #: containers (addressed by their key) and for a root nobody has put anywhere yet.
+        self.uid: str | None = saved.uid
+        # Root only: uid → instance of the whole tree, and the highest uid handed out so far.
+        self._uids: dict[str, Instance] = {}
+        self._uid_high = 0
+        self._index(self)
+
         self._build()
+        self._live = False
         self.load(saved)
+        self._live = True
 
     @classmethod
     def new(cls, def_id: str, game: str, params: dict[str, Any] | None = None) -> Instance:
@@ -315,13 +333,81 @@ class Instance:
         """
         old_root = self.root
         old_root._release_bindings(None if old_root is self else self)
+        old_root._unindex(self)
 
         self._contained = contained
         self._dependency_node.invalidate()
+        self.root._index(self)
 
         if old_root is not self:
             old_root._structure_changed()
         self.root._structure_changed()
+
+    # ------------------------------------------------------------------ identity (uid)
+
+    def _index(self, subtree: Instance) -> None:
+        """(Root only.) Record the uids of ``subtree``, which now belongs to this tree."""
+        for node in subtree.walk():
+            if node.uid is not None:
+                self._uids[node.uid] = node
+                if node.uid.isdigit():
+                    self._uid_high = max(self._uid_high, int(node.uid))
+
+    def _unindex(self, subtree: Instance) -> None:
+        """(Root only.) Forget the uids of ``subtree``, which leaves this tree. The high mark stays."""
+        for node in subtree.walk():
+            if node.uid is not None and self._uids.get(node.uid) is node:
+                del self._uids[node.uid]
+
+    def _claim_uids(self, subtree: Instance, include_root: bool = True) -> None:
+        """
+        (Root only.) Make the uids of ``subtree`` unique in this tree before it
+        joins: an instance without a uid, or with one that another instance here
+        already has, gets a new one. Entries of ``fixed`` containers get none —
+        they are addressed by their key and never move. ``include_root=False``:
+        ``subtree`` itself goes into a fixed container.
+
+        New uids count up from the highest one this tree has seen, so a uid is
+        never reused while the tree lives: a stale reference (a client that has
+        not seen a removal yet) finds nothing instead of the wrong item. Two
+        engines that apply the same changes hand out the same uids.
+        """
+        seen: set[str] = set()
+        for node in subtree.walk():
+            if node is subtree:
+                if not include_root:
+                    continue
+            elif node._contained is not None and node._contained.fixed:
+                continue
+            holder = self._uids.get(node.uid) if node.uid is not None else None
+            if node.uid is None or node.uid in seen or (holder is not None and holder is not node):
+                node._set_uid(self._fresh_uid(seen))
+            seen.add(node.uid)
+            if node.uid.isdigit():
+                self._uid_high = max(self._uid_high, int(node.uid))
+
+    def _fresh_uid(self, taken: set[str]) -> str:
+        """(Root only.) The next uid above the high mark that is neither indexed nor in ``taken``."""
+        while True:
+            self._uid_high += 1
+            uid = str(self._uid_high)
+            if uid not in self._uids and uid not in taken:
+                return uid
+
+    def _set_uid(self, uid: str) -> None:
+        """Change this instance's uid, in its root's index and as its key in a list container."""
+        old, root = self.uid, self.root
+        if old is not None and root._uids.get(old) is self:
+            del root._uids[old]
+        self.uid = uid
+        root._uids[uid] = self
+        container = self._contained
+        if container is not None and container.keyed_by_uid and container._children.get(old) is self:
+            container._children[uid] = container._children.pop(old)
+
+    def find(self, uid: str) -> Instance | None:
+        """(Root only.) The instance with ``uid`` in this tree, or ``None`` (untracked)."""
+        return self._uids.get(uid)
 
     @property
     def owner(self) -> Instance | None:
@@ -412,18 +498,33 @@ class Instance:
         ``activates: false`` is a boundary: an effect whose source sits below a
         non-activating container (an item in the backpack) still reaches targets
         inside that item, but nothing outside it — ``entity.*`` stays inert.
+
+        All or nothing: every target is resolved and every new binding checked
+        first. If anything fails, :class:`BindingError` is raised and no binding
+        has changed — a half-applied re-bind would leave effects bound that no
+        later re-bind knows about.
         """
         self._rebind_pending = False
         desired: dict[Manipulation, set[Property]] = {}
+        problems: list[str] = []
         for source in self.walk():
             scope = source._effect_scope()
             for manipulation in source._manipulations:
-                targets = {
-                    prop for prop in manipulation.target.resolve(source)
-                    if prop.instance._is_within(scope)
-                }
+                try:
+                    resolved = self._resolve_target(manipulation, source)
+                except EngineError as error:
+                    problems.append(str(error))
+                    continue
+                targets = {prop for prop in resolved if prop.instance._is_within(scope)}
+                for prop in targets - self._bindings.get(manipulation, set()):
+                    reason = prop.why_not_manipulation(manipulation)
+                    if reason is not None:
+                        problems.append(reason)
                 if targets:
                     desired[manipulation] = targets
+        if problems:
+            self._rebind_pending = True  # the structure is still unbound; try again on the next change
+            raise BindingError("; ".join(problems))
 
         # Apply only the difference: unbind what is no longer desired, bind what is new.
         for manipulation, props in self._bindings.items():
@@ -433,6 +534,33 @@ class Instance:
             for prop in props - self._bindings.get(manipulation, set()):
                 prop.add_manipulation(manipulation)
         self._bindings = desired
+
+    def _resolve_target(self, manipulation: Manipulation, source: Instance) -> list[Property]:
+        """
+        The props ``manipulation`` targets from ``source`` right now — refused if
+        the target path reads a value that may change without a re-bind.
+
+        A re-bind runs after structural changes and choices, nothing else. So a
+        target may read only ``const`` / ``choice`` / ``param`` values that no
+        effect changes — directly or through what they are computed from. A
+        ``state`` value (written during play) or a ``modifiable`` one (changed by
+        effects, i.e. by the bindings themselves) would leave the binding stale.
+        """
+        probe = DependencyNode(self.resolve_stack, lambda: None)
+        try:
+            props = probe.track_read(lambda: manipulation.target.resolve(source))
+            for node in probe.dependencies_closure():
+                read = node.owner
+                if isinstance(read, Property) and (read.source.writable or read.modifiable):
+                    kind = "a state value" if read.source.writable else "modified by effects"
+                    raise BindingError(
+                        f"target '{manipulation.target.describe()}' of '{source.def_id}' reads "
+                        f"'{read.path_str}', which is {kind}; a target may only read const or "
+                        f"choice values that no effect changes"
+                    )
+            return props
+        finally:
+            probe.reset_dependencies()  # the probe is thrown away: unlink it from what it read
 
     def _release_bindings(self, subtree: Instance | None = None) -> None:
         """
@@ -472,7 +600,7 @@ class Instance:
 
     def _save(self) -> DbData:
         """Like :meth:`to_data`, without the game — the form a child takes inside its parent's save."""
-        data = DbData(self.def_id)
+        data = DbData(self.def_id, uid=self.uid)
         for prop in self.props.values():
             serialized = prop.serialize()
             if serialized is not None:
@@ -493,9 +621,22 @@ class Instance:
         The constructor ends with this; called on a live instance it reverts the
         instance to the save (``inst.load(d)`` → ``inst.to_data() == d``). Fixed
         children are loaded into, never rebuilt, so effects bound to them survive.
+
+        If the effects of the loaded tree cannot be bound (:class:`BindingError`),
+        a live instance goes back to what it was before.
         """
         saved = DbData.coerce(data)
         self._check_save(saved)
+        before = self._save() if self._live and self.root._batch_depth == 0 else None
+        try:
+            self._apply_save(saved)
+        except BindingError:
+            if before is not None:
+                self._apply_save(before)
+            raise
+
+    def _apply_save(self, saved: DbData) -> None:
+        """The body of :meth:`load`, after the save was checked."""
         with self.batch():
             # Reset first, so every saved choice is checked against the values it will live with.
             for prop in self.props.values():
