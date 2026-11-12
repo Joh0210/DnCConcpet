@@ -538,6 +538,24 @@ STEP = "<name>"                         prop or container                     .l
   implementations that were resolved in advance. The dependency cache (§5)
   makes sure it only runs again when an input changes.
 
+**Built-in operations** (the `op` ids; written form in brackets):
+
+| Group | Operations |
+| --- | --- |
+| Arithmetic | `add` (`+`), `sub` (`-`), `mul` (`*`), `div` (`/`, always a `number`), `mod` (`%`), `pow` (`^`), `neg` (`-x`), `abs`, `floor` / `ceil` / `round` (`number → int`), `clamp(x, min, max)` (a null bound is open) |
+| Comparison | `eq` (`==`), `ne` (`!=`), `lt` (`<`), `le` (`<=`), `gt` (`>`), `ge` (`>=`); `==` works on any type, the others on ordered types |
+| Logic | `not`; lazy: `and`, `or`, `coalesce` (`??`), `cond` (`? :`) |
+| Lists | `list` (`[a, b]`), `in`, `count`, `sum`, `avg`, `min`, `max`, `first`, `last`, `any`, `all` |
+| Text | `concat` (templates), `join(list, separator = ", ")`, `roman` (`4 → IV`), `signed` (`2 → +2`) |
+| Effects | `transform`, `add`, `mul`, `atLeast`, `atMost`, `override` (in this order, §4.8) |
+
+A list is one value: `avg(entity.attributes[*].value)` takes the whole list as
+its single argument. For the empty list, `sum` and `count` give 0, `any` gives
+false and `all` gives true; `first`, `last`, `min`, `max` and `avg` give null.
+`min` and `max` also accept several separate values. A game-specific function
+(`diceByLevel`, `convertDamage`) is one more operation in the kernel, with its
+own signatures.
+
 ## 5. Evaluation
 
 - Values are computed lazily and cached. The engine records which values each

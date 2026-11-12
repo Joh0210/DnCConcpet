@@ -145,6 +145,26 @@ class PathValueTest(unittest.TestCase):
         heavy = where(op("gt", path("weight", root="it", type="number"), 5))
         self.assertEqual(self.read(path("inventory", heavy, "weight", type="list<number>")), [10])
 
+    def test_a_list_is_one_value_for_list_operations(self):
+        average = op("avg", path("attributes", ALL, "value", type="list<int>"))
+        self.assertEqual(build_value(average).describe(), "avg(attributes[*].value)")
+        self.assertEqual(self.read(average), 10)
+        self.char.container("attributes").get("str").prop("value").choose(16)
+        self.assertEqual(self.read(average), 11)  # (16 + 5 × 10) / 6
+
+    def test_a_template_with_a_kernel_function(self):
+        game = register_game({
+            "id": "shadow",
+            # "Shadow {roman(level)}"
+            "name": template("Shadow ", op("roman", LEVEL)),
+            "props": {"level": {"type": "int", "source": "choice", "default": 3, "range": [1, 10]}},
+        })
+        shadow = new("shadow", game)
+        self.assertEqual(shadow.name, "Shadow III")
+        shadow.prop("level").choose(4)
+        self.assertEqual(shadow.name, "Shadow IV")
+        self.assertEqual(build_value(template("Shadow ", op("roman", LEVEL))).describe(), '"Shadow {roman(level)}"')
+
     def test_a_single_container_is_transparent(self):
         self.assertEqual(self.read(path("speed", "walking", type="int")), 30)
         self.assertIs(self.read(path("magic", type="ref<magic>")), self.char.container("magic").get())

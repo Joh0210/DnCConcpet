@@ -5,6 +5,7 @@ effect — a negative ``add`` or a fractional ``mul`` does that job (concept §4
 """
 import math
 
+from datatype.Datatype import common_type
 from datatype.Operation import Operation, signature
 from errors import ExpressionError
 
@@ -130,6 +131,38 @@ class RoundOperation(Operation):
         return math.floor(a + 0.5) if a >= 0 else -math.floor(-a + 0.5)
 
 
+class AbsOperation(Operation):
+    """The amount without its sign: ``abs(-3)`` → ``3``."""
+
+    def name(self) -> str:
+        return "abs"
+
+    @signature("int", returns="int")
+    def of_int(self, a):
+        return abs(a)
+
+    @signature("number", returns="number")
+    def of_number(self, a):
+        return abs(a)
+
+
+class ClampOperation(Operation):
+    """
+    ``clamp(x, min, max)``: ``x`` moved into ``[min, max]``; a null bound is open
+    (``clamp(hp, 0, null)``). Works on every ordered type, enums included.
+    """
+
+    def name(self) -> str:
+        return "clamp"
+
+    def generic(self, types):
+        """(T, T, T) -> T for every ordered T"""
+        common = common_type(*types)
+        if len(types) != 3 or common is None or not common.ordered:
+            return None
+        return self.overload(types, common, common.clamp)
+
+
 for _operation in (SubOperation, DivOperation, ModOperation, PowOperation, NegOperation,
-                   FloorOperation, CeilOperation, RoundOperation):
+                   FloorOperation, CeilOperation, RoundOperation, AbsOperation, ClampOperation):
     Operation.register(_operation())

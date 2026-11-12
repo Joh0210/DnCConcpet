@@ -4,7 +4,7 @@ from datatype.Datatype import Datatype, common_type
 from datatype.Operation import Operation
 from datatype.datatypes.TypeInt import TypeInt
 from datatype.operations.AddOperation import AddOperation
-from errors import DefinitionError, UnsupportedOperationError
+from errors import DefinitionError, ExpressionError, UnsupportedOperationError
 
 
 class TypeCelsius(Datatype):
@@ -134,6 +134,36 @@ class OperationTest(unittest.TestCase):
         self.assertEqual(call("sum", ("list<number>", [])), 0)
         self.assertIsNone(call("max", ("list<int>", [])))
         self.assertEqual(call("max", ("int", 2), ("number", 2.5)), 2.5)
+
+    def test_list_helpers(self):
+        self.assertEqual(resolve("avg", "list<int>").returns.name(), "number")
+        self.assertEqual(call("avg", ("list<int>", [1, 2])), 1.5)
+        self.assertIsNone(call("avg", ("list<number>", [])))
+        self.assertEqual(call("last", ("list<int>", [1, 2])), 2)
+        self.assertIs(call("any", ("list<bool>", [False, True])), True)
+        self.assertIs(call("any", ("list<bool>", [])), False)
+        self.assertIs(call("all", ("list<bool>", [True, False])), False)
+        self.assertIs(call("all", ("list<bool>", [])), True)
+        with self.assertRaises(UnsupportedOperationError):
+            resolve("any", "list<int>")
+
+    def test_number_helpers(self):
+        self.assertEqual(call("abs", ("int", -3)), 3)
+        self.assertEqual(call("abs", ("number", -1.5)), 1.5)
+        self.assertEqual(call("clamp", ("int", 15), ("int", 0), ("int", 10)), 10)
+        self.assertEqual(call("clamp", ("int", 5), ("null", None), ("int", 3)), 3)  # null = open bound
+        self.assertEqual(call("clamp", ("ArmorCategory", "heavy"), ("ArmorCategory", "clothing"),
+                              ("ArmorCategory", "medium")), "medium")
+        self.assertEqual(resolve("clamp", "int", "int", "number").returns.name(), "number")
+
+    def test_text_helpers(self):
+        self.assertEqual([call("roman", ("int", n)) for n in (1, 4, 9, 14, 1994)], ["I", "IV", "IX", "XIV", "MCMXCIV"])
+        with self.assertRaisesRegex(ExpressionError, "1 … 3999"):
+            call("roman", ("int", 0))
+        self.assertEqual([call("signed", ("int", n)) for n in (2, 0, -1)], ["+2", "+0", "-1"])
+        self.assertEqual([call("signed", ("number", n)) for n in (1.5, -2.0)], ["+1.5", "-2"])
+        self.assertEqual(call("join", ("list<Attribute>", ["str", "dex"])), "str, dex")
+        self.assertEqual(call("join", ("list<int>", [1, None, 2]), ("text", " / ")), "1 / 2")
 
     def test_unsupported_combination_lists_what_is_supported(self):
         with self.assertRaisesRegex(UnsupportedOperationError, r"'mul' does not support \(text, int\); supported: "

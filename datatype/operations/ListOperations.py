@@ -1,7 +1,12 @@
 """
 Functions on lists — what a fanning-out path (``inventory[*].weight``) yields —
-and the list literal ``[a, b]``. Lists are never null; ``sum`` / ``count`` of the
-empty list is 0, ``first`` / ``min`` / ``max`` of it are null (concept §4.6).
+and the list literal ``[a, b]``. A list is *one* value of type ``list<T>``, so
+these functions take it as a single argument: the average of all attributes is
+``avg(entity.attributes[*].value)``.
+
+Lists are never null (concept §4.6). Of the empty list ``sum`` / ``count`` are 0,
+``any`` is false, ``all`` is true, and ``first`` / ``last`` / ``min`` / ``max`` /
+``avg`` are null.
 """
 from datatype.Datatype import Datatype, common_type
 from datatype.Operation import Operation
@@ -117,6 +122,69 @@ class MaxOperation(_Extreme):
         return "max"
 
 
-for _operation in (ListOperation, InOperation, SumOperation, CountOperation, FirstOperation,
-                   MinOperation, MaxOperation):
+class AvgOperation(Operation):
+    """
+    The mean of numbers — always a ``number``. (Once ``Dice`` exists, ``avg(dice)``
+    — its expected value, concept §4.7 — is one more ``@signature`` here.)
+    """
+
+    def name(self) -> str:
+        return "avg"
+
+    def generic(self, types):
+        """(list<int>) -> number, (list<number>) -> number"""
+        element = _element(types)
+        if element is None or not (element.kind() == "number" or element.widens_to("number")):
+            return None
+
+        def avg(values):
+            present = [value for value in values if value is not None]
+            return sum(present) / len(present) if present else None
+
+        return self.overload(types, Datatype.get("number"), avg)
+
+
+class LastOperation(Operation):
+    def name(self) -> str:
+        return "last"
+
+    def generic(self, types):
+        """(list<T>) -> T (null when empty)"""
+        element = _element(types)
+        if element is None:
+            return None
+        return self.overload(types, element, lambda values: values[-1] if values else None)
+
+
+class _Quantifier(Operation):
+    """``any`` / ``all`` over a list of bools — usually a path that fans out."""
+
+    test = staticmethod(any)
+
+    def generic(self, types):
+        """(list<bool>) -> bool"""
+        element = _element(types)
+        if element is None or element.kind() != "bool":
+            return None
+        return self.overload(types, Datatype.get("bool"), lambda values: type(self).test(bool(v) for v in values))
+
+
+class AnyOperation(_Quantifier):
+    """At least one entry is true: ``any(entity.conditions[*].magic)``. False for the empty list."""
+
+    def name(self) -> str:
+        return "any"
+
+
+class AllOperation(_Quantifier):
+    """Every entry is true. True for the empty list."""
+
+    test = staticmethod(all)
+
+    def name(self) -> str:
+        return "all"
+
+
+for _operation in (ListOperation, InOperation, SumOperation, CountOperation, FirstOperation, LastOperation,
+                   MinOperation, MaxOperation, AvgOperation, AnyOperation, AllOperation):
     Operation.register(_operation())
