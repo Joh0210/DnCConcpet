@@ -243,15 +243,19 @@ class Instance:
         Attach to ``contained`` (or detach with ``None``). Same steps as the old
         ComponentDefinition, but run by the roots instead of every component:
 
-        1. drop the effects this tree bound while it was a root (removeModifiers),
+        1. the old root drops, right away, every binding that touches this subtree
+           (removeModifiers) — all of them if this instance is the root itself,
         2. switch the container and notify everything that read owner / entity,
         3. let the old and the new root re-bind their effects (applyModifiers).
+
+        Step 1 must not wait for the old root's (possibly batched) re-bind: the new
+        root binds the subtree's own effects again, and a late re-bind of the old
+        root would remove exactly those.
 
         Containers call this; use :meth:`Container.add` / :meth:`Container.remove`.
         """
         old_root = self.root
-        if old_root is self:
-            self._release_bindings()
+        old_root._release_bindings(None if old_root is self else self)
 
         self._contained = contained
         self._buffer.update()
@@ -368,12 +372,22 @@ class Instance:
                 prop.add_manipulation(manipulation)
         self._bindings = desired
 
-    def _release_bindings(self) -> None:
-        """Remove every manipulation this root has bound (before it becomes part of another tree)."""
+    def _release_bindings(self, subtree: Instance | None = None) -> None:
+        """
+        (Root only.) Remove the bindings that touch ``subtree`` — its source or its
+        target lies in it — or every binding if ``subtree`` is ``None``. Used when
+        ``subtree`` leaves this tree, or this root becomes part of another tree.
+        """
+        members = None if subtree is None else set(subtree.walk())
+        kept: dict[Manipulation, set[Property]] = {}
         for manipulation, props in self._bindings.items():
+            cut = members is None or manipulation.source in members
             for prop in props:
-                prop.remove_manipulation(manipulation)
-        self._bindings = {}
+                if cut or prop.instance in members:
+                    prop.remove_manipulation(manipulation)
+                else:
+                    kept.setdefault(manipulation, set()).add(prop)
+        self._bindings = kept
 
     def _effect_scope(self) -> Instance:
         """The topmost instance this one's effects may reach (see :meth:`_rebind`)."""

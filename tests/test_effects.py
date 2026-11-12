@@ -67,6 +67,25 @@ class EntityEffectTest(unittest.TestCase):
         bob.container("equipment").add(dagger, "offHand")
         self.assertEqual((attribute(alice, "str"), attribute(bob, "str")), (10, 13))
 
+    def test_an_items_own_effects_survive_leaving_a_tree(self):
+        # The old root re-binds batched (after the item is its own root again);
+        # it must not take the item's own effects with it.
+        store = make_store()
+        alice, bob = Instance("character", store=store), Instance("character", store=store)
+        axe = alice.container("equipment").add("battleaxe", "mainHand")
+        axe.container("material").add("steel")
+        self.assertEqual(axe.get("weight"), 6)
+
+        alice.container("equipment").remove("mainHand")
+        self.assertEqual(axe.get("weight"), 6)
+
+        alice.container("equipment").add(axe, "mainHand")
+        with alice.batch():  # move while the old root's re-bind is deferred
+            bob.container("equipment").add(axe, "mainHand")
+        self.assertEqual(axe.get("weight"), 6)
+        self.assertEqual([m.description for m in axe.prop("weight").get_manipulation_trace()],
+                         ["Battleaxe: × stack", "Battleaxe: material weight"])
+
     def test_one_path_can_hit_several_properties(self):
         char = new("character")
         rope = char.container("inventory").add("rope")
