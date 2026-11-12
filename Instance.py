@@ -6,8 +6,9 @@ from typing import Any, Iterator
 
 from DbData import ComponentPath, DbData
 from Definitions import GAMES, DefinitionStore
-from InnerFunction import EvalContext, evaluate_value
+from InnerFunction import EvalContext, InnerFunction
 from container.Container import Container
+from datatype.Datatype import Datatype
 from errors import ContainerError, DefinitionError, PropertyError, did_you_mean
 from property.BufferElement import BufferElement
 from property.Manipulation import Manipulation
@@ -81,9 +82,10 @@ class Instance:
         self.traits: list[str] = []
         #: The most specific ``appliesTo`` of the chain; ``None`` = fits wherever ``of`` allows.
         self.applies_to: list[str] | None = None
-        self._texts: dict[str, Any] = {}
-        # `active` of every definition in the chain — AND-ed (concept §4.9).
-        self._guards: list[Any] = []
+        # name / text / footer — `text` VALUEs (templates are concat operations)
+        self._texts: dict[str, InnerFunction] = {}
+        # `active` of every definition in the chain — `bool` VALUEs, AND-ed (concept §4.9).
+        self._guards: list[InnerFunction] = []
         # One manipulation per effect of the chain.
         self._manipulations: list[Manipulation] = []
 
@@ -167,12 +169,18 @@ class Instance:
             )
 
         if "active" in entry:
-            self._guards.append(entry["active"])
+            self._guards.append(self._entry_value(entry, "active", "bool"))
         if "appliesTo" in entry:
             self.applies_to = list(entry["appliesTo"])
         for key in ("name", "text", "footer"):
             if key in entry:
-                self._texts[key] = entry[key]
+                self._texts[key] = self._entry_value(entry, key, "text")
+
+    def _entry_value(self, entry: dict, key: str, type_name: str) -> InnerFunction:
+        try:
+            return self.store.value(entry[key], Datatype.get(type_name))
+        except DefinitionError as error:
+            raise DefinitionError(f"'{entry.get('id', '?')}': {key}: {error}") from None
 
     def _check_new_name(self, name: str, entry_id: str) -> None:
         if name in self.props or name in self.containers:
@@ -242,7 +250,7 @@ class Instance:
     def is_active(self) -> bool:
         """Every ``active`` guard of the chain holds. Reads are tracked, so this re-evaluates on change."""
         ctx = EvalContext(this=self)
-        return all(bool(evaluate_value(guard, ctx)) for guard in self._guards)
+        return all(bool(guard.evaluate(ctx)) for guard in self._guards)
 
     # ------------------------------------------------------------------ texts
 
@@ -263,7 +271,7 @@ class Instance:
     def _text(self, key: str, default: str) -> str:
         if key not in self._texts:
             return default
-        return str(evaluate_value(self._texts[key], EvalContext(this=self)))
+        return str(self._texts[key].evaluate(EvalContext(this=self)))
 
     # ------------------------------------------------------------------ position in the tree
 

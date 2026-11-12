@@ -12,7 +12,9 @@ from tests.fixtures import TEST_GAME
 
 def breakdown(prop) -> str:
     """Base value and every bound effect — what the sheet could show for one value."""
-    lines = [f"{prop.path_str} = {prop.resolve()}", f"    base {prop.base_value()}"]
+    base = prop.base_expression
+    source = "" if base is None or base.is_literal else f"   = {base.describe()}"
+    lines = [f"{prop.path_str} = {prop.resolve()}", f"    base {prop.base_value()}{source}"]
     for manipulation in prop.get_manipulation_trace():
         state = "" if manipulation.is_applicable() else "   (inactive)"
         lines.append(f"    {manipulation.description}{state}")
@@ -34,7 +36,13 @@ if __name__ == '__main__':
     print(breakdown(axe.prop("damage")))
     print(breakdown(hero.container("attributes").get("dex").prop("value")))
     print(breakdown(hero.container("speed").get().prop("walking")))
+    print(breakdown(hero.prop("carryWeight")))
     print(f"carry {hero.get('carryWeight')} / {hero.get('carryLimit')}")
+
+    print("\n-- an effect as the engine reads it: JSON AST, no parsing --")
+    effect = boost.definition["effects"][0]
+    print(json.dumps(effect["add"]))
+    print("reads as:", boost.effects[0].value.describe(), " type:", boost.effects[0].value.type.name())
 
     print("\n-- anti-magic field: the boost (magic) is suppressed, keen is not --")
     hero.container("conditions").add("anti-magic-field")

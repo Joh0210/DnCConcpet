@@ -1,7 +1,7 @@
-from datatype.Operation import DuoOperation, Operation
+from datatype.Operation import Operation
 
 
-class OverrideOperation(DuoOperation):
+class OverrideOperation(Operation):
     """Replaces the value. Ranked last so an override really wins within its priority."""
 
     rank = 50
@@ -9,8 +9,11 @@ class OverrideOperation(DuoOperation):
     def name(self) -> str:
         return "override"
 
-    def use_any(self, datatype, previous, value):
-        return value
+    def generic(self, types):
+        """(T, U) -> U for every T, U"""
+        if len(types) != 2:
+            return None
+        return self.overload(types, types[1], lambda previous, value: value)
 
 
 Operation.register(OverrideOperation())

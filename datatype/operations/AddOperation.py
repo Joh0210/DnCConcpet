@@ -1,22 +1,34 @@
-from datatype.Operation import MultipleOperation, Operation
+from datatype.Operation import Operation, signature
 
 
-class AddOperation(MultipleOperation):
-    """Sum. On bool: "or". A negative value subtracts — there is no ``sub``."""
+class AddOperation(Operation):
+    """
+    Sum (``+``). On bool: "or", on text: concatenation. Also an effect: a
+    negative value subtracts — effects have no ``sub`` (concept §4.8).
+    """
 
     rank = 10
+    symbol = "+"
+    precedence = 6
 
     def name(self) -> str:
         return "add"
 
-    def use_int(self, *values):
-        return sum(values)
+    @signature("int", "int", returns="int")
+    def ints(self, a, b):
+        return a + b
 
-    def use_number(self, *values):
-        return sum(values)
+    @signature("number", "number", returns="number")
+    def numbers(self, a, b):
+        return a + b
 
-    def use_bool(self, *values):
-        return any(values)
+    @signature("bool", "bool", returns="bool")
+    def bools(self, a, b):
+        return a or b
+
+    @signature("text", "text", returns="text")
+    def texts(self, a, b):
+        return a + b
 
 
 Operation.register(AddOperation())

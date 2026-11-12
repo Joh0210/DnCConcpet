@@ -1,13 +1,19 @@
 """
 Schnittstellen zwischen Engine und Ausdrücken.
 
-Der Parser, der aus den YAML-Strings (``"2 * level + 1"``, ``entity.attributes[stat].value``)
-typisierte ASTs baut, ist nicht Teil dieses Prototyps. Die Engine kennt nur diese
-beiden Schnittstellen; zum Testen reichen Implementierungen mit Python-Funktionen
-(siehe ``tests/fixtures.py``).
+Der Parser macht aus den YAML-Strings (``"2 * level + 1"``,
+``entity.attributes[stat].value``) einen typisierten AST und schreibt ihn in die
+JSON (concept §4.14). Die Engine parst nie selbst — sie baut aus dem JSON-AST
+1:1 Knoten und wertet sie aus. Jeder Knoten ist ein VALUE::
 
-Ein Wert in einer Definition ist entweder ein Literal (``3``, ``"str"``, ``True``)
-oder eine :class:`InnerFunction` — "a literal is a constant expression" (concept §4.4).
+    VALUE = STATIC_VALUE | OPERATION | PATH
+
+- :class:`value.StaticValue.StaticValue` — ``{"value": "3", "type": "int"}``,
+- :class:`value.OperationValue.OperationValue` — ``{"op": "add", "args": [VALUE, ...]}``,
+- :class:`value.PathValue.PathValue` — ``{"path": [STEP, ...], "type": "int"}``.
+
+Alle drei sind :class:`InnerFunction`; ein Pfad ist zusätzlich ein
+:class:`TargetPath`. Gebaut werden sie von :func:`value.build_value`.
 """
 from __future__ import annotations
 
@@ -16,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from Instance import Instance
+    from datatype.Datatype import Datatype
     from property.Property import Property
 
 
@@ -27,11 +34,12 @@ class EvalContext:
       property's or container's owner). ``this.owner`` / ``this.entity`` lead
       further; both may be ``None`` while the instance is not attached.
     - ``previous``: the value so far (only meaningful for ``transform``).
-    - ``it``: the candidate of an ``accepts`` predicate or a filter.
+    - ``it``: the candidate of an ``accepts`` predicate or a ``where`` filter.
     - further names (``args``, ``action``, ...) as keywords.
 
-    Read other values through ``Instance.get`` / ``Property.resolve`` — that is
-    what registers the dependency, so the result is recomputed when they change.
+    A path starts at one of these (``"from"``, default ``this``). It reads other
+    values through ``Property.resolve`` / tracked container reads — that is what
+    registers the dependency, so the result is recomputed when they change.
     """
 
     __slots__ = ("this", "previous", "it", "extra")
@@ -48,17 +56,40 @@ class EvalContext:
         except KeyError:
             raise AttributeError(f"expression context has no '{name}'") from None
 
+    def var(self, name: str) -> Any:
+        """The value a path starts at: ``this``, ``it``, ``previous`` or an extra name."""
+        if name == "this":
+            return self.this
+        if name == "it":
+            return self.it
+        if name == "previous":
+            return self.previous
+        return getattr(self, name)
+
+    def with_it(self, it: Any) -> EvalContext:
+        """The same context with another candidate ``it`` (filters)."""
+        return EvalContext(self.this, self.previous, it, **self.extra)
+
 
 class InnerFunction(ABC):
     """
-    Quasi eine Funktion, welche immer genau auf einen Wert resolved.
-    Diese Funktion bekommt dabei den aktuellen Kontext übergeben (``ctx.this`` ist die
-    Instanz). Kann so also auf die Properties der Instanz zugreifen.
+    Quasi eine Funktion, welche immer genau auf einen Wert resolved — ein Knoten
+    des Ausdrucks-AST (ein VALUE). Sie bekommt den aktuellen Kontext übergeben
+    (``ctx.this`` ist die Instanz), kann also auf die Properties der Instanz und
+    über ``owner`` / ``entity`` auf ihre Umgebung zugreifen.
 
-    Durch die entity-Funktion der Instanz kann sie auch auf das Entity zugreifen, sofern
-    die Instanz contained ist. Hierbei muss allerdings auf None geachtet werden
-    (im Ausdruck: ``entity?.level ?? 0``).
+    Jeder Knoten hat einen **statischen Typ** (:attr:`type`), der schon beim
+    Bauen feststeht — Operationen werden deshalb einmal beim Laden aufgelöst,
+    nicht bei jeder Auswertung. Knoten sind unveränderlich und hängen an keiner
+    Instanz: ein gebauter Baum wird von allen Instanzen einer Definition geteilt.
     """
+
+    #: The static type of every value this node evaluates to (``None`` only for a target-only path).
+    type: Datatype | None
+    #: How tightly the node binds when it is written as text; atoms bind tightest.
+    precedence: int = 10
+    #: Whether the node is a :class:`value.StaticValue.StaticValue` (templates write those inline).
+    is_literal: bool = False
 
     @abstractmethod
     def evaluate(self, ctx: EvalContext) -> Any:
@@ -78,8 +109,9 @@ class TargetPath(ABC):
     Properties — zu einer (``owner.damage``) oder zu mehreren
     (``entity.attributes[.str, .dex].advantage``, ``entity.inventory[is weapon].weight``).
 
-    Der Pfad ist dabei wie folgt aufgebaut: der aktuelle Schritt, mit Optionen zur
-    Verzweigung und co, und ein weiterer TargetPath.
+    Verzweigungen sind Schritte, die aus einem Knoten mehrere machen (``[*]``,
+    mehrere Keys, Filter); der Rest des Pfads gilt dann für jeden Zweig.
+    Umgesetzt von :class:`value.PathValue.PathValue`.
     """
 
     @abstractmethod
@@ -92,17 +124,3 @@ class TargetPath(ABC):
 
     def describe(self) -> str:
         return type(self).__name__
-
-
-def evaluate_value(value: Any, ctx: EvalContext) -> Any:
-    """A literal as it is, an :class:`InnerFunction` evaluated in ``ctx``."""
-    if isinstance(value, InnerFunction):
-        return value.evaluate(ctx)
-    return value
-
-
-def describe_value(value: Any) -> str:
-    """Readable form of a literal or an expression, for generated labels."""
-    if isinstance(value, InnerFunction):
-        return value.describe()
-    return repr(value) if isinstance(value, str) else str(value)

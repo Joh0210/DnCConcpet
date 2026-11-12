@@ -1,28 +1,31 @@
-import math
-
-from datatype.Operation import MultipleOperation, Operation
+from datatype.Operation import Operation, signature
 
 
-class MulOperation(MultipleOperation):
+class MulOperation(Operation):
     """
-    Product. On int the result is floored, so a fractional factor rounds down
-    (there is no ``div``). On bool: "and".
+    Product (``*``). On bool: "and". ``int * number`` is a ``number``; as an
+    effect on an ``int`` prop the result is floored when it is assigned, so a
+    fractional factor rounds down (there is no ``div`` effect).
     """
 
     rank = 20
+    symbol = "*"
+    precedence = 7
 
     def name(self) -> str:
         return "mul"
 
-    def use_int(self, *values):
-        # math.prod instead of operator.mul: works for any number of values.
-        return math.floor(math.prod(values))
+    @signature("int", "int", returns="int")
+    def ints(self, a, b):
+        return a * b
 
-    def use_number(self, *values):
-        return math.prod(values)
+    @signature("number", "number", returns="number")
+    def numbers(self, a, b):
+        return a * b
 
-    def use_bool(self, *values):
-        return all(values)
+    @signature("bool", "bool", returns="bool")
+    def bools(self, a, b):
+        return a and b
 
 
 Operation.register(MulOperation())

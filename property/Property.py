@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from InnerFunction import EvalContext, InnerFunction, evaluate_value
+from InnerFunction import EvalContext, InnerFunction
 from datatype.Datatype import Datatype
 from errors import (
     CyclicDependencyError,
@@ -43,13 +43,20 @@ class Property:
 
     Built from the declaration in the YML/JSON (``props: {weight: {type: number, ...}}``):
 
-    - ``type``: name of a :class:`Datatype`; it parses, validates and combines values.
+    - ``type``: name of a :class:`Datatype`; it parses, validates and orders values.
     - ``source``: where the base comes from (:mod:`property.Source`); ``derive``
       implies ``derived``, otherwise ``const`` is the default.
-    - ``default`` / ``derive``: literal or :class:`InnerFunction`.
+    - ``default`` / ``derive``: a VALUE (concept §4.14).
     - ``modifiable``: whether effects may change the value.
-    - ``range`` (bounds may be expressions), ``options``, ``clamp`` (after all
-      effects), ``optional`` (may be ``None``).
+    - ``range`` (bounds are VALUEs), ``options`` (a list of VALUEs or one
+      ``list<T>`` VALUE), ``clamp`` (after all effects), ``optional`` (may be ``None``).
+
+    Every value from the definition is a node (:class:`InnerFunction`) — a
+    literal, a path or an operation are the same thing here, built by the
+    game's store and checked against the prop's type when the definition loads
+    (:meth:`_value`). The property only ever calls :meth:`evaluate` on them.
+    Values from outside the definitions — a choice, a write, a parameter, a
+    save — are plain data and go through the datatype (:meth:`parse_input`).
     """
 
     def __init__(self, instance: Instance, id: str, spec: dict):
@@ -71,11 +78,14 @@ class Property:
         self.modifiable: bool = bool(spec.get("modifiable", False))
         self.optional: bool = bool(spec.get("optional", False))
 
-        # Base value (const / derived) or default (choice / state / param): literal or InnerFunction.
-        self._base: Any = spec.get("derive", spec.get("default"))
+        # Base value (const / derived) or default (choice / state / param): a node, None while open.
         self._has_base: bool = "derive" in spec or "default" in spec
+        self._base: InnerFunction | None = (
+            self._value(spec["derive"] if "derive" in spec else spec["default"], "base value")
+            if self._has_base else None
+        )
         self._range = self._check_bounds(spec.get("range"), "range")
-        self._options = spec.get("options")
+        self._options = self._check_options(spec.get("options"))
         self._clamp = self._check_bounds(spec.get("clamp"), "clamp")
         self._locked = False
 
@@ -126,7 +136,7 @@ class Property:
         """A ``set`` in a definition: the base value (const) or the default (choice / state / param)."""
         if not self.source.settable:
             raise DefinitionError(f"'{self.path_str}' is {self.source.name}; it cannot be set")
-        self._base = value
+        self._base = self._value(value, "value")
         self._has_base = True
         self._property_buffer.update()
 
@@ -141,13 +151,13 @@ class Property:
         if "range" in spec:
             self._range = self._check_bounds(spec["range"], "range")
         if "options" in spec:
-            self._options = spec["options"]
+            self._options = self._check_options(spec["options"])
         if "default" in spec:
             self.adjust(spec["default"])
         if "lock" in spec:
             if not self.source.choosable:
                 raise DefinitionError(f"'{self.path_str}' is {self.source.name}; only a choice can be locked")
-            self._base = spec["lock"]
+            self._base = self._value(spec["lock"], "lock")
             self._has_base = True
             self._locked = True
         self._property_buffer.update()
@@ -156,14 +166,29 @@ class Property:
         """Declared without a value — allowed only on abstract entries."""
         return not self._has_base and not self.optional and self.source.requires_value
 
-    def _check_bounds(self, bounds: Any, key: str) -> list | None:
+    def _value(self, raw: Any, what: str, expected: Datatype | None = None) -> InnerFunction:
+        """A value of the definition as a node of the prop's type (``expected``), shared through the store."""
+        try:
+            return self.instance.store.value(raw, expected or self.datatype)
+        except DefinitionError as error:
+            raise DefinitionError(f"prop '{self.id}': {what}: {error}") from None
+
+    def _check_bounds(self, bounds: Any, key: str) -> list[InnerFunction] | None:
         if bounds is None:
             return None
         if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
             raise DefinitionError(f"prop '{self.id}': '{key}' must be [min, max] (null = unbounded)")
         if not self.datatype.ordered:
             raise DefinitionError(f"prop '{self.id}': type '{self.datatype.name()}' has no order, '{key}' makes no sense")
-        return list(bounds)
+        return [self._value(bound, f"{key} bound") for bound in bounds]
+
+    def _check_options(self, options: Any) -> list[InnerFunction] | InnerFunction | None:
+        """A list of values, or one value of type ``list<T>`` (``DamageType[where ...]``)."""
+        if options is None:
+            return None
+        if isinstance(options, (list, tuple)):
+            return [self._value(option, "option") for option in options]
+        return self._value(options, "options", Datatype.get(f"list<{self.datatype.name()}>"))
 
     # ------------------------------------------------------------------ reading
 
@@ -214,18 +239,27 @@ class Property:
         return self.source.base(self)
 
     @property
-    def base_expression(self) -> Any:
-        """The declared base / default: a literal or an InnerFunction."""
+    def base_expression(self) -> InnerFunction | None:
+        """The declared base / default node (``None`` while open)."""
         return self._base
 
-    def convert(self, raw: Any, what: str = "value") -> Any:
-        """A literal parsed, or an expression evaluated (``this`` = the instance), checked by the datatype."""
+    def evaluate(self, node: InnerFunction | None, what: str = "value") -> Any:
+        """A node of the definition evaluated with ``this`` = the instance, checked by the datatype."""
+        if node is None:
+            return None
+        value = node.evaluate(EvalContext(this=self.instance))
+        if value is None:
+            return None
+        try:
+            return self.datatype.validate(value)
+        except ValueError as error:
+            raise PropertyError(f"'{self.path_str}': invalid {what}: {error}") from error
+
+    def parse_input(self, raw: Any, what: str = "value") -> Any:
+        """A value from outside the definitions (choice, write, parameter, save) parsed by the datatype."""
         if raw is None:
             return None
         try:
-            if isinstance(raw, InnerFunction):
-                value = raw.evaluate(EvalContext(this=self.instance))
-                return None if value is None else self.datatype.validate(value)
             return self.datatype.parse(raw)
         except ValueError as error:
             raise PropertyError(f"'{self.path_str}': invalid {what}: {error}") from error
@@ -235,19 +269,21 @@ class Property:
         if self._range is None:
             return None, None
         lower, upper = self._range
-        return self.convert(lower, "range bound"), self.convert(upper, "range bound")
+        return self.evaluate(lower, "range bound"), self.evaluate(upper, "range bound")
 
     def options(self) -> list | None:
         """``options`` evaluated, or ``None`` when any value of the type is allowed."""
         if self._options is None:
             return None
-        options = evaluate_value(self._options, EvalContext(this=self.instance))
-        return [self.convert(option, "option") for option in options]
+        if isinstance(self._options, list):
+            return [self.evaluate(option, "option") for option in self._options]
+        ctx = EvalContext(this=self.instance)
+        return [self.datatype.validate(option) for option in self._options.evaluate(ctx)]
 
     def _apply_clamp(self, value: Any) -> Any:
         if self._clamp is None:
             return value
-        lower, upper = (self.convert(bound, "clamp bound") for bound in self._clamp)
+        lower, upper = (self.evaluate(bound, "clamp bound") for bound in self._clamp)
         return self.datatype.clamp(value, lower, upper)
 
     def _report_cycle(self) -> None:
@@ -272,9 +308,9 @@ class Property:
                 f"'{self.path_str}' is a {self.source.name} property; only choice properties can be chosen"
             )
         if self._locked:
-            raise PropertyError(f"'{self.path_str}' is locked to {self._base!r}")
+            raise PropertyError(f"'{self.path_str}' is locked to {self._base.describe()}")
         self._check_mutable()
-        value = self.convert(value)
+        value = self.parse_input(value)
         self.check_allowed(value)
         self._store(value)
         # A target path may depend on a choice (entity.attributes[stat]): let the root re-bind.
@@ -287,7 +323,7 @@ class Property:
                 f"'{self.path_str}' is a {self.source.name} property; only state properties can be written"
             )
         self._check_mutable()
-        value = self.convert(value)
+        value = self.parse_input(value)
         if value is not None:
             lower, upper = self.bounds()
             value = self.datatype.clamp(value, lower, upper)
@@ -357,16 +393,21 @@ class Property:
 
     def add_static_manipulation(self, manipulation: Manipulation) -> None:
         """A kernel-internal manipulation that belongs to the property itself (survives :meth:`remove`)."""
+        manipulation.check_target(self)
         if manipulation not in self._static_manipulation:
             self._static_manipulation.append(manipulation)
             self._property_buffer.update()
 
     def add_manipulation(self, manipulation: Manipulation) -> None:
-        """Bind an effect. Only ``modifiable`` properties accept effects."""
+        """
+        Bind an effect. Only ``modifiable`` properties accept effects, and only
+        effects whose operation works on this prop's type and whose result fits it.
+        """
         if not self.modifiable:
             raise PropertyError(
                 f"'{self.path_str}' is not modifiable; effect {manipulation!r} cannot target it"
             )
+        manipulation.check_target(self)
         if manipulation not in self._manipulation_trace:
             self._manipulation_trace.append(manipulation)
             self._property_buffer.update()

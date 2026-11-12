@@ -47,7 +47,7 @@ class Source:
 
     def base(self, prop: Property) -> Any:
         """The value before any effect."""
-        return prop.convert(prop.base_expression, "base value")
+        return prop.evaluate(prop.base_expression, "base value")
 
     def __repr__(self) -> str:
         return f"<Source {self.name}>"
@@ -95,7 +95,7 @@ class ParamSource(Source):
     def base(self, prop: Property) -> Any:
         params = prop.instance.params
         if prop.id in params:
-            return prop.convert(params[prop.id], "parameter")
+            return prop.parse_input(params[prop.id], "parameter")
         return super().base(prop)
 
 

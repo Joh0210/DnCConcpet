@@ -37,8 +37,17 @@ class CyclicDependencyError(EngineError):
     """A property's base value depends on itself, so there is no value to fall back to."""
 
 
-class UnsupportedOperationError(EngineError, TypeError):
-    """An operation was applied to a datatype that does not implement it."""
+class UnsupportedOperationError(DefinitionError, TypeError):
+    """An operation was applied to argument types it has no overload for.
+
+    Raised when an expression is built (the definition loads), not while it runs:
+    operations are resolved by the static types of their arguments.
+    """
+
+
+class ExpressionError(EngineError):
+    """An expression failed while it ran — e.g. a path segment is absent where
+    the content did not allow it (no ``?.``), or a division by zero."""
 
 
 def did_you_mean(name: str, candidates: Iterable[str]) -> str:

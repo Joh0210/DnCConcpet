@@ -1,8 +1,27 @@
 import unittest
 
+from datatype.Operation import Operation, signature
 from errors import ContainerError, IllegalMutationError
-from tests.fixtures import Fn, make_game, new
+from tests.fixtures import make_game, new
+from tests.ir import op
 from Instance import Instance
+
+
+class GreedyOperation(Operation):
+    """A misbehaving kernel function: it changes structure while a property resolves."""
+
+    lazy = True
+
+    def name(self):
+        return "test-greedy-add"
+
+    @signature(returns="int")
+    def grab(self, ctx):
+        ctx.this.container("items").add("rope")
+        return 0
+
+
+Operation.register(GreedyOperation())
 
 
 class ShapeTest(unittest.TestCase):
@@ -136,7 +155,7 @@ class ObserverTest(unittest.TestCase):
             "id": "greedy",
             "extends": "rope",
             "contains": {"items": {"of": "item", "list": True}},
-            "props": {"bad": {"type": "int", "derive": Fn("add", lambda c: c.this.container("items").add("rope") and 0)}},
+            "props": {"bad": {"type": "int", "derive": op("test-greedy-add")}},
         })
         with self.assertRaises(IllegalMutationError):
             new("greedy", game).get("bad")

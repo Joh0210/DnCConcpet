@@ -119,3 +119,51 @@ Aber erstmal zu den Properties selbst.
 Die Default Properity bekommt einen entsprechenden Datentyp und einen startwert übergeben, 
 sowie die konfigurationen aus der YML. Der Startwert ist dabei in form eines Strings angegeben. 
 Die Konkrete Evaluierung und Verarbeitung dieses Wertes wird von dem Datentyp übernommen und erfolgt dabei vollständig generisch.   
+
+Alle Werte aus der Definition (`default`, `derive`, `set`, Grenzen von `range`, …) sind dabei VALUEs (siehe unten).
+Die Property muss also nicht mehr zwischen Literal und Ausdruck unterscheiden: sie hält nur Knoten und ruft `evaluate` auf.
+Werte von außen (eine Wahl, ein `write`, ein Parameter, ein Save) sind dagegen reine Daten und gehen über den Datentyp (`parse`).
+
+
+## Werte (VALUE)
+Der Parser übersetzt die Ausdrücke aus der YML (`"2 * level + 1"`) schon vorher in ihren AST und schreibt ihn in die JSON (concept §4.14).
+Die Engine parst also nie selbst, sie baut aus jedem JSON-Knoten 1:1 einen Knoten und wertet ihn aus:
+
+```
+VALUE = STATIC_VALUE | OPERATION | PATH
+
+STATIC_VALUE  { "value": "3", "type": "int" }             -> StaticValue
+OPERATION     { "op": "add", "args": [VALUE, VALUE] }      -> OperationValue
+PATH          { "path": ["level"], "type": "int" }         -> PathValue
+```
+
+Alle drei sind `InnerFunction`s (`evaluate(ctx)`, `describe()`, `type`), ein Pfad ist zusätzlich ein `TargetPath`.
+Gebaut werden sie an genau einer Stelle (`value.build_value`). Der `DefinitionStore` cacht sie, sodass jeder JSON-Knoten
+pro Spiel nur einmal gebaut wird und alle Instanzen sich den Baum teilen (die Instanz kommt erst über den Kontext dazu).
+
+- **StaticValue:** der Wert wird beim Bauen einmal vom Datentyp geparst, danach nur noch zurückgegeben.
+  Ein nackter JSON-Wert (`4`, `true`, `"Battleaxe"`) ist eine Kurzform davon. Er bekommt den Typ seines Slots (z.B. den der Property)
+  oder sonst den seiner JSON-Art.
+- **PathValue:** eine flache Liste von Schritten. Jeder Schritt macht aus jedem aktuellen Knoten null bis mehrere neue.
+  Verzweigungen (`[*]`, mehrere Keys, `is`- und `where`-Filter) brauchen deshalb kein doppeltes `next`, denn der Rest des Pfads gilt für jeden Zweig.
+  Ein verzweigter Pfad liefert eine Liste (`list<T>`). Ein Pfad muss seinen Typ angeben, weil ein fehlender Wert
+  oder eine leere Liste zur Laufzeit keinen Typ mehr hat. Derselbe Pfad dient auch als Ziel eines Effekts (`resolve`).
+- **OperationValue:** löst die Operation beim Bauen anhand der Typen der Argumente auf. Daraus ergibt sich auch der eigene Typ.
+
+## Datentypen und Operationen
+Die Operation ist der Einstiegspunkt, nicht der Datentyp. Sie bekommt beliebige Argumenttypen und entscheidet selbst:
+
+1. eine Methode mit `@signature("int", "int", returns="int")`, deren Typen exakt passen,
+2. dasselbe mit Erweiterung (`int` passt auf `number`),
+3. `generic(types)` für Regeln über alle Typen (`==`, `atLeast` auf allem Geordneten, `? :`),
+4. sonst `UnsupportedOperationError` mit der Liste der unterstützten Signaturen.
+
+Das passiert einmal beim Laden (die Typen sind statisch) und wird pro Typ-Kombination gecacht.
+Der Ergebnistyp kommt aus der Überladung: `lt(int, int)` ist `bool`, `div(int, int)` ist `number`.
+Ein neuer Datentyp braucht keine Änderung an den Operationen, denn die generischen funktionieren sofort.
+
+`and`, `or`, `??` und `? :` sind *lazy*: sie bekommen die Knoten statt der Werte und werten nur aus, was sie brauchen.
+Sonst würde `entity != null and entity.level > 3` ohne Entity scheitern, und der nicht genommene Zweig würde zur Abhängigkeit.
+
+Effekte nutzen dieselben Operationen: `add: 2` ist `add(previous, 2)`. Die Auflösung passiert beim Binden an eine Property,
+das Ergebnis wird der Property zugewiesen. Die einzige erlaubte Verengung ist dabei `number -> int` (abrunden), damit ein `mul: 0.5` funktioniert.

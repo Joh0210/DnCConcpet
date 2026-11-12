@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Union
 
 from DbData import ContainerPath, DbData
-from InnerFunction import EvalContext, evaluate_value
+from InnerFunction import EvalContext, InnerFunction
 from datatype.Datatype import Datatype
 from errors import ContainerError, DefinitionError, IllegalMutationError, did_you_mean
 from property.BufferElement import BufferElement
@@ -176,9 +176,11 @@ class Container:
         else:
             self.shape = SingleShape()
         self.optional = bool(spec.get("optional", False))
-        self.accepts = spec.get("accepts")
+        #: ``bool`` VALUE on the candidate ``it``; ``None`` = no extra condition.
+        self.accepts: InnerFunction | None = self._value(spec, "accepts", "bool")
         self.unique = bool(spec.get("unique", False))
-        self.limit = spec.get("limit")
+        #: ``int`` VALUE; ``None`` = unlimited.
+        self.limit: InnerFunction | None = self._value(spec, "limit", "int")
         self.fixed = bool(spec.get("fixed", False))
         self.seed: list[str] = list(spec.get("seed", []))
         self.granted = bool(spec.get("granted", False))
@@ -189,6 +191,14 @@ class Container:
         self._children: dict[str, Instance] = {}
         # Notified when a child is added or removed, so whatever read the container re-resolves.
         self._buffer = BufferElement(self.owner.prop_call_stack, lambda: None)
+
+    def _value(self, spec: dict, key: str, type_name: str) -> InnerFunction | None:
+        if key not in spec:
+            return None
+        try:
+            return self.owner.store.value(spec[key], Datatype.get(type_name))
+        except DefinitionError as error:
+            raise DefinitionError(f"container '{self.id}': {key}: {error}") from None
 
     # ------------------------------------------------------------------ reading (tracked)
 
@@ -284,7 +294,7 @@ class Container:
             for other_key, other in self._children.items():
                 if other_key != key and other is not instance and other.id == instance.id:
                     return f"'{self.path_str}' already holds '{instance.id}' (unique)"
-        if self.accepts is not None and not evaluate_value(self.accepts, EvalContext(this=self.owner, it=instance)):
+        if self.accepts is not None and not self.accepts.evaluate(EvalContext(this=self.owner, it=instance)):
             return f"'{self.path_str}' does not accept '{instance.id}'"
         return None
 
@@ -354,7 +364,7 @@ class Container:
         found = []
         count = len(self._children)
         if self.limit is not None:
-            limit = evaluate_value(self.limit, EvalContext(this=self.owner))
+            limit = self.limit.evaluate(EvalContext(this=self.owner))
             if count > limit:
                 found.append(f"'{self.path_str}' holds {count} entries, the limit is {limit}")
         if self.shape.name == "single" and not self.optional and count == 0:

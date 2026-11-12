@@ -53,7 +53,9 @@ Model and content share one format; the model is simply the abstract top of the
 inheritance tree.
 
 **Pipeline:** `YAML (authored) → validate → JSON (IR) → engine`. YAML allows
-comments and is pleasant to write; JSON is the stable format the engine loads. A
+comments and is pleasant to write; JSON is the stable format the engine loads.
+Expressions are parsed here too: the JSON holds their typed ASTs (§4.14), so the
+engine only interprets and never parses. A
 JSON Schema generated from the model gives IDE autocompletion. A typed config
 language (Pkl) or an own DSL can later replace the YAML front end without
 touching the engine.
@@ -175,7 +177,8 @@ change in play and `derived` for computed ones.
   same thing; a literal is a constant expression.
 - **Types** (defined by the kernel): `int`, `number`, `bool`, `text`, `Dice`
   (`2d6+1`), `Damage` (`1d8 fire + 1d4 cold`), `Die`, kernel enums (`Attribute`,
-  `DamageType`, `Slot`, …), `ref<kind>`, `list<T>`.
+  `DamageType`, `Slot`, …), `ref<kind>` (an instance of `kind`), `list<T>`, and
+  `null`, the type of the literal `null`. `int` widens to `number`.
 
 ### 4.5 Containers
 
@@ -270,7 +273,8 @@ is 0.
 
 ### 4.7 Expressions
 
-Strings, parsed into a typed AST during validation:
+Strings, parsed into a typed AST during validation. The JSON carries that AST
+(§4.14):
 
 ```
 2 * level + 1
@@ -316,7 +320,8 @@ convertDamage(previous, from: .physical, to: .psychic, times: 2)
 
 Why strings instead of nested objects (`{ method: add, value1: … }`): the same AST
 and the same checks at a fraction of the size — far easier to read and write,
-for people and AI alike.
+for people and AI alike. The nested form exists, but only in the generated JSON
+(§4.14), where nobody writes it by hand.
 
 ### 4.8 Effects
 
@@ -457,11 +462,91 @@ Everything else is rebuilt from the definitions. The validator can check saves
 too (unknown def, choice out of range) — the hook for migrations when content
 changes.
 
+### 4.14 Expressions in the JSON
+
+The parser turns every expression string into its typed AST, and the JSON
+carries that AST. The engine never parses — it builds one node per JSON node
+and evaluates it. There are three kinds of node:
+
+```
+VALUE = STATIC | OPERATION | PATH
+
+STATIC     { "value": <literal>, "type": "<type>" }                  3, .heavy, null
+OPERATION  { "op": "<operation>", "args": [VALUE, …] }                2 * level, floor(x), a ? b : c
+PATH       { "path": [STEP, …], "type": "<type>", "from"?: "<root>" }  entity?.attributes[stat].value
+
+STEP = "<name>"                         prop or container                     .level
+     | "*"                              every child of a container            [*]
+     | { "get": "<name>", "opt": true } a segment that may be absent          material?.power
+     | { "to": "owner" | "entity" }     navigation, may carry "opt": true     entity?.level
+     | { "key": [VALUE, …] }            map / list keys; several fan out      [stat], [.str, .dex]
+     | { "is": "<id>" }                 type filter                           [is weapon]
+     | { "where": VALUE }               predicate on the candidate `it`       [where it.weight > 5]
+```
+
+`2 * level + 1` becomes:
+
+```json
+{ "op": "add", "args": [
+    { "op": "mul", "args": [ { "value": "2", "type": "int" }, { "path": ["level"], "type": "int" } ] },
+    { "value": "1", "type": "int" } ] }
+```
+
+- **Every node has a static type.** A static value and a path declare their
+  type, and an operation gets its type from the overload it resolves to. A path
+  has to declare its type because a path can yield nothing. An absent `?.`
+  segment or an empty list carries no type at runtime, yet
+  `sum(inventory[*].weight)` must still be a `number`. A path that fans out has
+  the type `list<…>`, and every other path has a single type.
+- **Operations resolve by signature, when the entry loads.** An operation is
+  the entry point: it gets the argument types and picks its implementation.
+  First it tries a typed overload (`add(int, int) → int`), then the same with
+  widening (`int` fits `number`), then a generic rule for any type (`==`,
+  `atLeast` on any ordered type, `? :`). The result type comes from the
+  overload, not from the arguments: `lt(int, int)` is a `bool` and
+  `div(int, int)` is a `number`. A type error stops the entry from loading. It
+  never reaches a running game.
+- **Lazy operations.** `and`, `or`, `??` and `? :` get their argument nodes
+  and evaluate only what they need. This lets a null check protect what follows
+  it (`entity != null and entity.level > 3`). It also keeps the untaken branch
+  from becoming a dependency of the value. Every other operation gets its
+  argument values.
+- **Paths are flat step lists.** Every step maps each current node to zero or
+  more nodes, and the rest of the path applies to each of them. That is all
+  the branching the path language has: `[.str, .dex].advantage` goes on with
+  `.advantage` in both branches. A single container is transparent
+  (`material.power`). A list or map container needs `[*]`, a key or a filter.
+- **Absent segments.** `"opt": true` marks a segment that may be absent. If it
+  is absent, the path yields `null`, and a path that fans out drops that
+  branch. If a segment without `opt` is absent, a value fails, and a target is
+  inert (§4.6).
+- **Effects use the same operations.** The effect key is the operation id
+  (`add`, `mul`, `atLeast`, `atMost`, `override`, `transform`). Its first
+  argument is the target's value so far. The result is assigned to the prop:
+  the same type or a widening is kept as is. Effects allow one narrowing:
+  `number → int` floors, which is how a fractional `mul` works without a `div`.
+  Expressions never narrow implicitly (`floor` is explicit, §4.7).
+- **Shorthand.** A bare JSON scalar is a static value. It is typed by its
+  slot if the slot has a type (`set: { weight: 4 }` gets the prop's type).
+  Otherwise its JSON kind decides: `true` is `bool`, `3` is `int`, `2.5` is
+  `number`, `"a"` is `text`, and `null` is `null`. The parser writes the full
+  form, and the shorthand keeps hand-written JSON readable. Templates are the
+  operation `concat`.
+- **Built once.** Nodes are immutable and see their instance only through the
+  evaluation context. Each JSON node is built once per game, on first use, and
+  every instance shares the result. Evaluating a node walks the tree and calls
+  implementations that were resolved in advance. The dependency cache (§5)
+  makes sure it only runs again when an input changes.
+
 ## 5. Evaluation
 
 - Values are computed lazily and cached. The engine records which values each
   computation read and invalidates exactly those when an input changes — like
   today's dependency buffer, but derived from the AST instead of wired by hand.
+- Expressions arrive as typed ASTs (§4.14). Their operations are resolved by
+  type when an entry loads, and their nodes are built once and shared by every
+  instance. Evaluating an expression is a short tree walk, and only a changed
+  input makes it run again.
 - Grant inputs are tracked the same way.
 - Cycles (A's effect reads B, B's effect reads A) are caught by the validator
   where paths are static, and by a runtime guard where filters make them dynamic.
@@ -507,6 +592,9 @@ right thing.
 - **Kernel size:** spell resolution, damage, payment and ability folding are
   code. The line between *mechanic* (kernel) and *content* (data) has to stay
   sharp.
+- **`ref<kind>`:** in expressions a ref is an instance (`material`, `it`).
+  Still open: how a `ref` prop is saved (the definition id, or a path to an
+  instance).
 - **Actions:** Das Konzept muss bei den Aktionen und events etwas erweitert und verbessert werden. 
 - **Charakter Sheet Konzept:** wie das ganze dann auf dem Charakter Sheet angezeigt wird ist auch noch zu kären.
   vielleicht ebenfalls wieder über diese Gruppen?

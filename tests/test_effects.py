@@ -2,7 +2,8 @@
 import unittest
 
 from Instance import Instance
-from tests.fixtures import attribute, make_game, new, on_entity, snapshot, walking
+from tests.fixtures import attribute, make_game, new, snapshot, walking
+from tests.ir import ENTITY, path
 
 
 class OwnerEffectTest(unittest.TestCase):
@@ -141,7 +142,7 @@ class GuardTest(unittest.TestCase):
         game = make_game({
             "id": "lead-boots",
             "extends": "feat",
-            "effects": [{"target": on_entity("speed", "walking"), "add": -25}],
+            "effects": [{"target": path(ENTITY, "speed", "walking"), "add": -25}],
         })
         char = new("character", game)
         char.container("feats").add("lead-boots")
