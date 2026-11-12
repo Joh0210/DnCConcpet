@@ -2,7 +2,7 @@
 import unittest
 
 from Instance import Instance
-from tests.fixtures import attribute, make_store, new, on_entity, snapshot, walking
+from tests.fixtures import attribute, make_game, new, on_entity, snapshot, walking
 
 
 class OwnerEffectTest(unittest.TestCase):
@@ -58,8 +58,7 @@ class EntityEffectTest(unittest.TestCase):
         self.assertEqual([m.description for m in trace], ["Ability Score Boost 3: Your dex increases by 7"])
 
     def test_effects_follow_an_item_to_another_entity(self):
-        store = make_store()
-        alice, bob = Instance("character", store=store), Instance("character", store=store)
+        alice, bob = new("character"), new("character")
         dagger = alice.container("equipment").add("dagger", "mainHand")
         dagger.container("enchantments").add("ability-score-boost")
         self.assertEqual(attribute(alice, "str"), 13)
@@ -70,8 +69,7 @@ class EntityEffectTest(unittest.TestCase):
     def test_an_items_own_effects_survive_leaving_a_tree(self):
         # The old root re-binds batched (after the item is its own root again);
         # it must not take the item's own effects with it.
-        store = make_store()
-        alice, bob = Instance("character", store=store), Instance("character", store=store)
+        alice, bob = new("character"), new("character")
         axe = alice.container("equipment").add("battleaxe", "mainHand")
         axe.container("material").add("steel")
         self.assertEqual(axe.get("weight"), 6)
@@ -140,12 +138,12 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(attribute(char, "str", "advantage"), 0)
 
     def test_clamp_holds_after_all_effects(self):
-        store = make_store({
+        game = make_game({
             "id": "lead-boots",
             "extends": "feat",
             "effects": [{"target": on_entity("speed", "walking"), "add": -25}],
         })
-        char = Instance("character", store=store)
+        char = new("character", game)
         char.container("feats").add("lead-boots")
         self.assertEqual(walking(char), 5)
         char.container("inventory").add("rope").prop("stack").write(20)  # overloaded: -20
@@ -154,8 +152,7 @@ class GuardTest(unittest.TestCase):
 
 class DeterminismTest(unittest.TestCase):
     def test_the_order_of_adding_does_not_change_results_or_traces(self):
-        store = make_store()
-        first, second = Instance("character", store=store), Instance("character", store=store)
+        first, second = new("character"), new("character")
         first.container("feats").add("fleet-footed")
         first.container("feats").add("slow-and-steady")
         second.container("feats").add("slow-and-steady")
@@ -182,7 +179,7 @@ class DeterminismTest(unittest.TestCase):
         char.container("conditions").add("anti-magic-field")
         self.assertEqual(walking(char), 20)
 
-        loaded = Instance("character", char.to_data(), store=char.store)
+        loaded = Instance(char.to_data())
         self.assertEqual(snapshot(loaded), snapshot(char))
 
 

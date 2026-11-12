@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Iterator
 
 from DbData import ComponentPath, DbData
-from Definitions import DEFAULT_STORE, DefinitionStore
+from Definitions import GAMES, DefinitionStore
 from InnerFunction import EvalContext, evaluate_value
 from container.Container import Container
 from errors import ContainerError, DefinitionError, PropertyError, did_you_mean
@@ -38,7 +39,12 @@ class Instance:
     ``props`` become :class:`Property` objects, ``contains`` become
     :class:`Container` objects, ``set`` / ``refine`` adjust inherited props,
     ``effects`` become :class:`Manipulation` objects, ``active`` guards are
-    collected. Finally the saved data is applied.
+    collected. Finally the saved data is applied (:meth:`load`).
+
+    Two ways to create one — the game is always given exactly once:
+
+    - ``Instance(save)``: from a save, which names its definition and its game,
+    - ``Instance.new("battleaxe", "dnd5e")``: a fresh instance, nothing saved yet.
 
     Effects are bound by the *root* of a tree (the topmost instance): after every
     structural change it resolves every effect target again and applies only the
@@ -46,17 +52,28 @@ class Instance:
     apply / remove cascade and makes loading independent of container order.
     """
 
-    def __init__(
-        self,
-        id: str,
-        data: DbData | dict | None = None,
-        store: DefinitionStore | None = None,
-        params: dict[str, Any] | None = None,
-    ):
+    def __init__(self, data: DbData | dict, params: dict[str, Any] | None = None):
+        """
+        Build an instance from a save (:class:`DbData` or its dict form). The save
+        holds everything needed: the definition id and the game whose definitions
+        (:data:`Definitions.GAMES`) it is built from. ``params`` are bound by
+        whoever creates the instance and are not saved.
+
+        Building has two steps: :meth:`_build` reads the definitions, then
+        :meth:`load` applies the save — the same method that reverts a live
+        instance to a save later.
+        """
+        saved = DbData.coerce(data)
+        if saved.game is None:
+            raise DefinitionError(
+                f"save of '{saved.def_id}' names no game — "
+                f"use Instance.new('{saved.def_id}', <game>) for a fresh instance"
+            )
         self._prop_call_stack: list[BufferElement] = []
         self._contained: Container | None = None
-        self.id = id
-        self.store = store if store is not None else DEFAULT_STORE
+        #: The game (rule system) whose definitions this instance is built from.
+        self.game: str = saved.game
+        self.id: str = saved.def_id
         self.params: dict[str, Any] = dict(params or {})
         self.props: dict[str, Property] = {}
         self.containers: dict[str, Container] = {}
@@ -78,20 +95,34 @@ class Instance:
         self._batch_depth = 0
         self._rebind_pending = False
 
+        self._build()
+        self.load(saved)
+
+    @classmethod
+    def new(cls, def_id: str, game: str, params: dict[str, Any] | None = None) -> Instance:
+        """A fresh instance of ``def_id`` in ``game`` — nothing saved yet, everything at its default."""
+        return cls(DbData(def_id, game=game), params)
+
+    # ------------------------------------------------------------------ building
+
+    def _build(self) -> None:
+        """Read the definitions: walk the ``extends`` chain, then apply it from the base down."""
+        store = self.store
+
         # 1. Vererbungskette ablaufen (Kind -> Eltern), Zyklen melden
         definitions = []
-        current_id: str | None = id
+        current_id: str | None = self.id
         while current_id is not None:
             if current_id in self.sub_ids:
                 cycle = " -> ".join([*self.sub_ids, current_id])
                 raise DefinitionError(f"cyclic extends: {cycle}")
             self.sub_ids.append(current_id)
-            data_object = self.store.get(current_id)
+            data_object = store.get(current_id)
             definitions.append(data_object)
             current_id = data_object.get("extends")
 
         if definitions[0].get("abstract", False):
-            raise DefinitionError(f"'{id}' is abstract and cannot be instantiated")
+            raise DefinitionError(f"'{self.id}' is abstract and cannot be instantiated")
 
         # 2. Von der Basis zum Kind anwenden (LIFO), damit Kinder überschreiben
         for data_object in reversed(definitions):
@@ -99,21 +130,9 @@ class Instance:
 
         open_props = [prop.id for prop in self.props.values() if prop.is_open()]
         if open_props:
-            raise DefinitionError(f"'{id}' leaves {open_props} without a value; set them or mark '{id}' abstract")
-
-        # 3. Daten setzen
-        saved = DbData.coerce(data) if data is not None else None
-        if saved is not None and saved.def_id != id:
-            raise DefinitionError(f"save of '{saved.def_id}' cannot be loaded into '{id}'")
-        with self.batch():
-            if saved is not None:
-                self._check_saved_containers(saved)
-                self._load_values(saved)
-            for container_id, container in self.containers.items():
-                container.initialize(saved.children.get(container_id) if saved is not None else None)
-            self._structure_changed()  # bind the effects of the new tree
-
-    # ------------------------------------------------------------------ building
+            raise DefinitionError(
+                f"'{self.id}' leaves {open_props} without a value; set them or mark '{self.id}' abstract"
+            )
 
     def _apply_definition(self, entry: dict) -> None:
         entry_id = entry.get("id", "?")
@@ -168,9 +187,20 @@ class Instance:
             )
         return self.props[prop_id]
 
-    def spawn(self, def_id: str, data: DbData | dict | None = None, params: dict | None = None) -> Instance:
-        """A new instance from the same definition store (used by containers)."""
-        return type(self)(def_id, data, store=self.store, params=params)
+    def spawn(self, data: DbData | dict | str, params: dict | None = None) -> Instance:
+        """
+        A new instance of this instance's game (used by containers): from a
+        definition id or a child save. A child save names no game — it inherits
+        this one; naming another game is an error.
+        """
+        saved = DbData.coerce(data)
+        if saved.game is None:
+            saved = replace(saved, game=self.game)
+        elif saved.game != self.game:
+            raise DefinitionError(
+                f"save of '{saved.def_id}' belongs to game '{saved.game}', '{self.id}' to '{self.game}'"
+            )
+        return type(self)(saved, params)
 
     # ------------------------------------------------------------------ access
 
@@ -195,6 +225,11 @@ class Instance:
     def is_a(self, type_id: str) -> bool:
         """Whether ``type_id`` is this entry or one of its ``extends`` ancestors."""
         return type_id in self.sub_ids
+
+    @property
+    def store(self) -> DefinitionStore:
+        """The definitions of this instance's game, looked up in :data:`GAMES`."""
+        return GAMES.get(self.game)
 
     @property
     def definition(self) -> dict:
@@ -399,7 +434,17 @@ class Instance:
     # ------------------------------------------------------------------ save / load
 
     def to_data(self) -> DbData:
-        """Only what the definitions cannot know (concept §4.13)."""
+        """
+        The save of this instance and everything below it — only what the
+        definitions cannot know (concept §4.13). Names its game, so the save alone
+        is enough to build the instance again: ``Instance(instance.to_data())``.
+        """
+        data = self._save()
+        data.game = self.game
+        return data
+
+    def _save(self) -> DbData:
+        """Like :meth:`to_data`, without the game — the form a child takes inside its parent's save."""
         data = DbData(self.id)
         for prop in self.props.values():
             serialized = prop.serialize()
@@ -411,22 +456,44 @@ class Instance:
                 data.children[container_id] = saved
         return data
 
-    def _load(self, data: DbData) -> None:
-        """Apply a save to this (freshly built) instance: its values, then its containers."""
-        if data.def_id != self.id:
-            raise DefinitionError(f"save of '{data.def_id}' cannot be loaded into '{self.id}'")
-        self._check_saved_containers(data)
+    def load(self, data: DbData | dict | str) -> None:
+        """
+        Make this instance match a save: every saved value and child is restored,
+        everything the save leaves out goes back to the definition's default
+        (default values, ``seed``, untouched ``fixed`` entries). ``granted``
+        containers are left alone — grants refill them.
+
+        The constructor ends with this; called on a live instance it reverts the
+        instance to the save (``inst.load(d)`` → ``inst.to_data() == d``). Fixed
+        children are loaded into, never rebuilt, so effects bound to them survive.
+        """
+        saved = DbData.coerce(data)
+        self._check_save(saved)
         with self.batch():
-            self._load_values(data)
-            for container_id, saved in data.children.items():
-                self.containers[container_id].load_data(saved)
+            # Reset first, so every saved choice is checked against the values it will live with.
+            for prop in self.props.values():
+                if prop.id not in saved.props:
+                    prop.reset()
+            for prop_id, raw in saved.props.items():
+                self.props[prop_id].deserialize(raw)
+            for container_id, container in self.containers.items():
+                container.load(saved.children.get(container_id))
+            self._structure_changed()  # bind the effects of the (new) tree
 
-    def _load_values(self, data: DbData) -> None:
-        for prop_id, raw in data.props.items():
-            self.prop(prop_id).deserialize(raw)
-
-    def _check_saved_containers(self, data: DbData) -> None:
-        for container_id in data.children:
+    def _check_save(self, saved: DbData) -> None:
+        """Reject a save that does not fit this instance, before anything changes."""
+        if saved.def_id != self.id:
+            raise DefinitionError(f"save of '{saved.def_id}' cannot be loaded into '{self.id}'")
+        if saved.game is not None and saved.game != self.game:
+            raise DefinitionError(
+                f"save of '{saved.def_id}' belongs to game '{saved.game}', '{self.id}' to '{self.game}'"
+            )
+        for prop_id in saved.props:
+            if prop_id not in self.props:
+                raise PropertyError(
+                    f"save of '{self.id}' has unknown prop '{prop_id}'{did_you_mean(prop_id, self.props)}"
+                )
+        for container_id in saved.children:
             if container_id not in self.containers:
                 raise ContainerError(
                     f"save of '{self.id}' has unknown container '{container_id}'"

@@ -1,7 +1,7 @@
 import unittest
 
 from errors import ContainerError, IllegalMutationError
-from tests.fixtures import Fn, make_store, new
+from tests.fixtures import Fn, make_game, new
 from Instance import Instance
 
 
@@ -49,8 +49,8 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(dagger.contained.id, "equipment")
 
     def test_an_instance_cannot_be_put_inside_itself(self):
-        store = make_store({"id": "bag", "extends": "rope", "contains": {"items": {"of": "item", "list": True}}})
-        bag = Instance("bag", store=store)
+        game = make_game({"id": "bag", "extends": "rope", "contains": {"items": {"of": "item", "list": True}}})
+        bag = new("bag", game)
         inner = bag.container("items").add("bag")
         with self.assertRaisesRegex(ContainerError, "inside itself"):
             inner.container("items").add(bag)
@@ -62,26 +62,23 @@ class AcceptanceTest(unittest.TestCase):
             new("dagger").container("enchantments").add("steel")
 
     def test_applies_to_narrows_where_an_entry_may_go(self):
-        store = make_store()
         with self.assertRaisesRegex(ContainerError, r"applies only to \['armor'\]"):
-            Instance("dagger", store=store).container("material").add("leather")
-        Instance("padded-armor", store=store).container("material").add("leather")
+            new("dagger").container("material").add("leather")
+        new("padded-armor").container("material").add("leather")
         with self.assertRaisesRegex(ContainerError, r"applies only to \['weapon'\]"):
-            Instance("padded-armor", store=store).container("enchantments").add("keen")
+            new("padded-armor").container("enchantments").add("keen")
 
     def test_accepts_checks_the_candidate(self):
-        store = make_store()
         with self.assertRaisesRegex(ContainerError, "does not accept 'oak'"):
-            Instance("battleaxe", store=store).container("material").add("oak")  # needs metal
-        Instance("dagger", store=store).container("material").add("oak")  # any material
+            new("battleaxe").container("material").add("oak")  # needs metal
+        new("dagger").container("material").add("oak")  # any material
         with self.assertRaisesRegex(ContainerError, "does not accept 'steel'"):
-            Instance("padded-armor", store=store).container("material").add("steel")  # not metal
+            new("padded-armor").container("material").add("steel")  # not metal
 
     def test_can_accept_answers_without_raising(self):
-        store = make_store()
-        axe = Instance("battleaxe", store=store)
-        self.assertTrue(axe.container("material").can_accept(Instance("steel", store=store)))
-        self.assertFalse(axe.container("material").can_accept(Instance("oak", store=store)))
+        axe = new("battleaxe")
+        self.assertTrue(axe.container("material").can_accept(new("steel")))
+        self.assertFalse(axe.container("material").can_accept(new("oak")))
 
     def test_unique_refuses_a_second_copy(self):
         feats = new("character").container("feats")
@@ -117,7 +114,7 @@ class SeedTest(unittest.TestCase):
     def test_a_removed_seed_stays_removed_after_loading(self):
         char = new("character")
         char.container("conditions").remove("0")
-        loaded = Instance("character", char.to_data(), store=char.store)
+        loaded = Instance(char.to_data())
         self.assertEqual(len(loaded.container("conditions")), 0)
 
 
@@ -135,14 +132,14 @@ class ObserverTest(unittest.TestCase):
         self.assertEqual(char.get("carryWeight"), 1)
 
     def test_changing_a_container_during_a_resolve_is_blocked(self):
-        store = make_store({
+        game = make_game({
             "id": "greedy",
             "extends": "rope",
             "contains": {"items": {"of": "item", "list": True}},
             "props": {"bad": {"type": "int", "derive": Fn("add", lambda c: c.this.container("items").add("rope") and 0)}},
         })
         with self.assertRaises(IllegalMutationError):
-            Instance("greedy", store=store).get("bad")
+            new("greedy", game).get("bad")
 
 
 if __name__ == "__main__":

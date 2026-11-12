@@ -11,15 +11,20 @@ ChildrenData = Union["DbData", list["DbData"], dict[str, "DbData"]]
 @dataclass
 class DbData:
     """
-    The saved form of one instance (concept §4.13). A save stores only what the
-    definitions cannot know; everything else is rebuilt from them:
+    The saved form of one instance (concept §4.13) — everything needed to build it
+    again. A save stores only what the definitions cannot know; everything else is
+    rebuilt from them:
 
     - ``def_id``: the definition id (JSON key ``def``),
     - ``props``: prop id → serialized value of every ``choice`` prop the user picked
       and every ``state`` prop that changed in play. Which of the two a prop is
       comes from its definition, so the save does not repeat it; a ``choice``
       being present here *is* the "reviewed" flag — no extra wire format,
-    - ``children``: container id → saved children, shaped like the container.
+    - ``children``: container id → saved children, shaped like the container,
+    - ``game``: the game (rule system) the definition belongs to. Required at the
+      top of a save (``Instance(save)`` reads it); children always belong to the
+      game of their parent, so they carry ``None`` = "inherit". (Addition to
+      concept §4.13.)
 
     Values are strings produced by ``Datatype.serialize``; reading accepts native
     JSON values too (``Datatype.parse``).
@@ -28,6 +33,7 @@ class DbData:
     def_id: str
     props: dict[str, Any] = field(default_factory=dict)
     children: dict[str, ChildrenData] = field(default_factory=dict)
+    game: str | None = None
 
     def is_empty(self) -> bool:
         """Nothing beyond the definition id — the instance is exactly its definition."""
@@ -35,7 +41,8 @@ class DbData:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-compatible dict with the keys of concept §4.13; empty sections are left out."""
-        result: dict[str, Any] = {"def": self.def_id}
+        result: dict[str, Any] = {} if self.game is None else {"game": self.game}
+        result["def"] = self.def_id
         if self.props:
             result["props"] = dict(self.props)
         if self.children:
@@ -54,12 +61,17 @@ class DbData:
                 container_id: _children_from_dict(children)
                 for container_id, children in data.get("children", {}).items()
             },
+            game=data.get("game"),
         )
 
     @classmethod
-    def coerce(cls, data: DbData | dict[str, Any]) -> DbData:
-        """Accept a DbData or its dict form."""
-        return data if isinstance(data, DbData) else cls.from_dict(data)
+    def coerce(cls, data: DbData | dict[str, Any] | str) -> DbData:
+        """Accept a DbData, its dict form, or a bare definition id (= nothing saved yet)."""
+        if isinstance(data, DbData):
+            return data
+        if isinstance(data, str):
+            return cls(data)
+        return cls.from_dict(data)
 
 
 def _children_to_dict(children: ChildrenData) -> Any:

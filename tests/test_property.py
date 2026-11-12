@@ -1,6 +1,5 @@
 import unittest
 
-from Definitions import DefinitionStore
 from Instance import Instance
 from datatype.Operation import Operation
 from errors import (
@@ -10,7 +9,7 @@ from errors import (
     PropertyError,
 )
 from property.Manipulation import Manipulation
-from tests.fixtures import Fn, get, own
+from tests.fixtures import Fn, get, own, register_game
 
 COUNTER = {
     "id": "counter",
@@ -26,14 +25,16 @@ COUNTER = {
 }
 
 
+COUNTER_GAME = register_game(COUNTER)
+
+
 def build(*entries, **params) -> Instance:
-    """Instantiate the last of ``entries`` from a store holding them and COUNTER."""
-    store = DefinitionStore([COUNTER, *entries])
-    return Instance(entries[-1]["id"], store=store, params=params)
+    """Instantiate the last of ``entries`` from a new game holding them and COUNTER."""
+    return Instance.new(entries[-1]["id"], register_game(COUNTER, *entries), params)
 
 
 def counter() -> Instance:
-    return Instance("counter", store=DefinitionStore([COUNTER]))
+    return Instance.new("counter", COUNTER_GAME)
 
 
 class SourceTest(unittest.TestCase):

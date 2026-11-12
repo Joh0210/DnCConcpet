@@ -14,10 +14,11 @@ Deviations from doc/rewrite/*.yaml, to stay inside this prototype:
 """
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Any, Callable, Iterable
 
-from Definitions import DefinitionStore
+from Definitions import GAMES, DefinitionStore
 from InnerFunction import EvalContext, InnerFunction, TargetPath
 from Instance import Instance
 
@@ -387,13 +388,31 @@ CONTENT: list[dict] = [
 ]
 
 
-def make_store(*extra: dict) -> DefinitionStore:
-    """A fresh store with the model, the content and ``extra`` entries."""
-    return DefinitionStore([*MODEL, *CONTENT, *extra])
+_game_numbers = itertools.count(1)
 
 
-def new(def_id: str, data=None, store: DefinitionStore | None = None, **params) -> Instance:
-    return Instance(def_id, data, store=store if store is not None else make_store(), params=params)
+def register_game(*entries: dict) -> str:
+    """Register a new game holding ``entries`` under a fresh id (game ids are never reused); returns the id."""
+    return GAMES.register(DefinitionStore(f"test-{next(_game_numbers)}", entries)).game
+
+
+def make_game(*extra: dict) -> str:
+    """A new game with the model, the content and ``extra`` entries; returns its id."""
+    return register_game(*MODEL, *CONTENT, *extra)
+
+
+#: The game of every test that needs no extra entries. Shared: definitions never change at runtime.
+TEST_GAME = GAMES.register(DefinitionStore("test", [*MODEL, *CONTENT])).game
+
+
+def new(data: str | dict, game: str = TEST_GAME, **params) -> Instance:
+    """
+    A fresh instance (definition id) or one from a save dict, in ``game`` unless
+    the save names one; ``params`` are bound as instance parameters.
+    """
+    if isinstance(data, str):
+        return Instance.new(data, game, params)
+    return Instance({"game": game, **data}, params)
 
 
 def attribute(entity: Instance, key: str, prop: str = "value"):

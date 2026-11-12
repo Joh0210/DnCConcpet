@@ -4,7 +4,7 @@ import unittest
 from DbData import DbData
 from Instance import Instance
 from errors import ContainerError, DefinitionError, PropertyError
-from tests.fixtures import attribute, make_store, new, snapshot, walking
+from tests.fixtures import TEST_GAME, attribute, make_game, new, snapshot, walking
 
 
 class InheritanceTest(unittest.TestCase):
@@ -31,49 +31,48 @@ class InheritanceTest(unittest.TestCase):
             new("batleaxe")
 
     def test_cyclic_extends(self):
-        store = make_store({"id": "a", "extends": "b"}, {"id": "b", "extends": "a"})
+        game = make_game({"id": "a", "extends": "b"}, {"id": "b", "extends": "a"})
         with self.assertRaisesRegex(DefinitionError, "cyclic extends: a -> b -> a"):
-            Instance("a", store=store)
+            new("a", game)
 
     def test_redeclaring_an_inherited_prop_is_an_error(self):
-        store = make_store({"id": "bad-axe", "extends": "battleaxe", "props": {"damage": {"type": "int"}}})
+        game = make_game({"id": "bad-axe", "extends": "battleaxe", "props": {"damage": {"type": "int"}}})
         with self.assertRaisesRegex(DefinitionError, "redeclares 'damage'"):
-            Instance("bad-axe", store=store)
+            new("bad-axe", game)
 
     def test_set_on_an_unknown_prop_suggests_the_closest(self):
-        store = make_store({"id": "bad-axe", "extends": "battleaxe", "set": {"damgae": 3}})
+        game = make_game({"id": "bad-axe", "extends": "battleaxe", "set": {"damgae": 3}})
         with self.assertRaisesRegex(DefinitionError, "did you mean 'damage'"):
-            Instance("bad-axe", store=store)
+            new("bad-axe", game)
 
     def test_unknown_entry_key_suggests_the_closest(self):
-        store = make_store({"id": "bad-axe", "extends": "battleaxe", "efects": []})
+        game = make_game({"id": "bad-axe", "extends": "battleaxe", "efects": []})
         with self.assertRaisesRegex(DefinitionError, "did you mean 'effects'"):
-            Instance("bad-axe", store=store)
+            new("bad-axe", game)
 
     def test_concrete_entry_must_give_every_prop_a_value(self):
-        store = make_store({"id": "half-axe", "extends": "weapon", "set": {"martial": True}})
+        game = make_game({"id": "half-axe", "extends": "weapon", "set": {"martial": True}})
         with self.assertRaisesRegex(DefinitionError, "without a value"):
-            Instance("half-axe", store=store)
+            new("half-axe", game)
 
     def test_traits_add_props_and_cannot_be_applied_twice(self):
         trait = {"id": "glowing", "props": {"light": {"type": "int", "default": 10}}}
-        store = make_store(trait, {"id": "lamp", "extends": "rope", "traits": ["glowing"]})
-        self.assertEqual(Instance("lamp", store=store).get("light"), 10)
-        store = make_store(trait, {"id": "lamp", "extends": "rope", "traits": ["glowing", "glowing"]})
+        game = make_game(trait, {"id": "lamp", "extends": "rope", "traits": ["glowing"]})
+        self.assertEqual(new("lamp", game).get("light"), 10)
+        game = make_game(trait, {"id": "lamp", "extends": "rope", "traits": ["glowing", "glowing"]})
         with self.assertRaisesRegex(DefinitionError, "applied twice"):
-            Instance("lamp", store=store)
+            new("lamp", game)
 
     def test_ignored_keys_of_later_features_are_accepted(self):
-        store = make_store({"id": "torch", "extends": "rope", "on": {"long-rest": []}, "grants": []})
-        self.assertEqual(Instance("torch", store=store).get("weight"), 10)
+        game = make_game({"id": "torch", "extends": "rope", "on": {"long-rest": []}, "grants": []})
+        self.assertEqual(new("torch", game).get("weight"), 10)
 
 
 class TextTest(unittest.TestCase):
     def test_name_defaults_to_the_id_and_may_be_a_template(self):
-        store = make_store()
-        self.assertEqual(Instance("battleaxe", store=store).name, "Battleaxe")
-        self.assertEqual(Instance("attribute", store=store).name, "attribute")
-        boost = Instance("ability-score-boost", store=store)
+        self.assertEqual(new("battleaxe").name, "Battleaxe")
+        self.assertEqual(new("attribute").name, "attribute")
+        boost = new("ability-score-boost")
         boost.prop("level").choose(2)
         self.assertEqual(boost.name, "Ability Score Boost 2")
         self.assertIn("rune", boost.description)
@@ -115,13 +114,13 @@ class SaveTest(unittest.TestCase):
     def test_a_fresh_instance_saves_only_its_seeded_containers(self):
         self.assertEqual(
             new("character").to_data().to_dict(),
-            {"def": "character", "children": {"conditions": [{"def": "overloaded"}]}},
+            {"game": TEST_GAME, "def": "character", "children": {"conditions": [{"def": "overloaded"}]}},
         )
 
     def test_round_trip_through_json_restores_every_value(self):
         char = self.build_character()
         saved = json.loads(json.dumps(char.to_data().to_dict()))
-        loaded = Instance("character", saved, store=char.store)
+        loaded = Instance(saved)
 
         self.assertEqual(snapshot(loaded), snapshot(char))
         self.assertEqual(loaded.to_data(), char.to_data())
@@ -136,19 +135,94 @@ class SaveTest(unittest.TestCase):
 
     def test_unknown_container_in_a_save_is_reported(self):
         with self.assertRaisesRegex(ContainerError, "did you mean 'inventory'"):
-            new("character", {"def": "character", "children": {"inventroy": []}})
+            new({"def": "character", "children": {"inventroy": []}})
 
     def test_a_value_of_an_unsaved_prop_is_reported(self):
         with self.assertRaisesRegex(PropertyError, "is derived; it is not saved"):
-            new("character", {"def": "character", "props": {"featCount": "3"}})
+            new({"def": "character", "props": {"featCount": "3"}})
 
     def test_a_choice_out_of_range_in_a_save_is_reported(self):
         with self.assertRaisesRegex(PropertyError, "outside the range"):
-            new("character", {"def": "character", "props": {"level": "42"}})
+            new({"def": "character", "props": {"level": "42"}})
 
     def test_save_of_another_definition_is_rejected(self):
-        with self.assertRaises(DefinitionError):
-            new("character", {"def": "dagger"})
+        with self.assertRaisesRegex(DefinitionError, "cannot be loaded into 'character'"):
+            new("character").load({"def": "dagger"})
+
+
+class GameTest(unittest.TestCase):
+    def test_a_save_names_its_game_once_and_is_enough_to_rebuild(self):
+        char = new("character")
+        char.container("inventory").add("rope")
+        data = char.to_data()
+        self.assertEqual(data.game, TEST_GAME)
+        self.assertIsNone(data.children["inventory"][0].game)  # children inherit the game
+        self.assertEqual(Instance(data.to_dict()).game, TEST_GAME)
+
+    def test_a_save_without_a_game_is_rejected(self):
+        with self.assertRaisesRegex(DefinitionError, r"names no game — use Instance\.new\('character'"):
+            Instance({"def": "character"})
+        with self.assertRaisesRegex(DefinitionError, "names no game"):
+            Instance("character")  # a bare id is a save without a game
+
+    def test_new_builds_a_fresh_instance_of_a_game(self):
+        char = Instance.new("character", TEST_GAME)
+        self.assertEqual((char.id, char.game), ("character", TEST_GAME))
+        self.assertEqual(char.to_data(), new("character").to_data())
+        with self.assertRaisesRegex(DefinitionError, "unknown game 'tset' — did you mean 'test'"):
+            Instance.new("character", "tset")
+
+    def test_children_cannot_belong_to_another_game(self):
+        other = make_game()
+        with self.assertRaisesRegex(DefinitionError, f"belongs to game '{other}'"):
+            new({"def": "character", "children": {"inventory": [{"game": other, "def": "rope"}]}})
+        with self.assertRaisesRegex(DefinitionError, f"belongs to game '{other}'"):
+            new("character").load({"game": other, "def": "character"})
+
+    def test_an_instance_of_another_game_does_not_fit(self):
+        rope = new("rope", make_game())
+        with self.assertRaisesRegex(ContainerError, "belongs to game"):
+            new("character").container("inventory").add(rope)
+
+    def test_children_are_spawned_in_their_parents_game(self):
+        game = make_game()
+        rope = new("character", game).container("inventory").add("rope")
+        self.assertEqual(rope.game, game)
+
+
+class LoadTest(unittest.TestCase):
+    def test_load_reverts_a_live_instance_to_a_save(self):
+        char = SaveTest().build_character()
+        saved = char.to_data()
+        strength = char.container("attributes").get("str")
+
+        char.prop("level").choose(7)
+        strength.prop("value").choose(8)
+        char.container("inventory").get("0").prop("stack").write(9)
+        char.container("inventory").add("dagger")
+        char.container("feats").remove("0")
+        char.container("conditions").remove("0")
+        char.container("equipment").remove("mainHand")
+        self.assertNotEqual(char.to_data(), saved)
+
+        char.load(saved)
+        self.assertEqual(char.to_data(), saved)
+        self.assertEqual(snapshot(char), snapshot(Instance(saved)))
+        self.assertIs(char.container("attributes").get("str"), strength)  # fixed entries are loaded into
+        self.assertEqual(attribute(char, "dex"), 13)  # effects bound again
+
+    def test_loading_a_bare_id_resets_to_the_definition(self):
+        char = SaveTest().build_character()
+        char.load("character")
+        self.assertEqual(char.to_data(), new("character").to_data())
+        self.assertEqual(snapshot(char), snapshot(new("character")))
+
+    def test_a_bad_save_is_rejected_before_anything_changes(self):
+        char = new("character")
+        char.prop("level").choose(5)
+        with self.assertRaisesRegex(ContainerError, "unknown container"):
+            char.load({"def": "character", "children": {"inventroy": []}})
+        self.assertEqual(char.get("level"), 5)
 
 
 if __name__ == "__main__":

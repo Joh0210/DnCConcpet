@@ -271,7 +271,9 @@ class Container:
         return True
 
     def why_not(self, instance: Instance, key: str | None = None) -> str | None:
-        """Why ``instance`` cannot go in (``None``: it can). Checks ``of``, ``appliesTo``, ``unique``, ``accepts``."""
+        """Why ``instance`` cannot go in (``None``: it can). Checks game, ``of``, ``appliesTo``, ``unique``, ``accepts``."""
+        if instance.game != self.owner.game:
+            return f"'{instance.id}' belongs to game '{instance.game}', '{self.path_str}' to '{self.owner.game}'"
         if not instance.is_a(self.of):
             return f"'{instance.id}' is not a '{self.of}', so it does not fit '{self.path_str}'"
         if instance.applies_to is not None and not any(self.owner.is_a(t) for t in instance.applies_to):
@@ -321,11 +323,8 @@ class Container:
         return instance
 
     def _instantiate(self, child: ChildInput) -> Instance:
-        if isinstance(child, str):
+        if isinstance(child, (str, DbData, dict)):
             return self.owner.spawn(child)
-        if isinstance(child, (DbData, dict)):
-            data = DbData.coerce(child)
-            return self.owner.spawn(data.def_id, data)
         return child
 
     def _refuse_if_managed(self, action: str) -> None:
@@ -364,34 +363,25 @@ class Container:
 
     # ------------------------------------------------------------------ save / load
 
-    def initialize(self, saved: Any = None) -> None:
+    def load(self, saved: Any = None) -> None:
         """
-        Fill the container of a new instance: the fixed entries (the save is then
-        loaded *into* them), else the save, else the seed.
-        """
-        if self.fixed:
-            if self.shape.name == "list":
-                entries = [(str(index), def_id) for index, def_id in enumerate(self.seed)]
-            else:
-                entries = [(key, self.of) for key in self.shape.fixed_keys(self)]
-            for key, def_id in entries:
-                self._put(key, def_id)
-            if saved is not None:
-                self._load_into_fixed(saved)
-        elif saved is not None:
-            self.load_data(saved)
-        else:
-            for def_id in self.seed:
-                self._put(self.shape.new_key(self), def_id)
+        Make the container hold exactly what ``saved`` says (shaped like the
+        container); ``None`` means "nothing saved", i.e. the definition's default:
 
-    def load_data(self, saved: Any) -> None:
-        """Make the container hold exactly the saved children."""
+        - ``fixed``: the entries always exist — created when missing (a new
+          instance), otherwise the save is loaded *into* them; an entry the save
+          leaves out is reset,
+        - ``granted``: refilled by grants, never loaded — left alone,
+        - otherwise: the saved children, or the ``seed`` if nothing is saved.
+        """
         if self.fixed:
-            self._load_into_fixed(saved)
+            self._load_fixed(saved)
             return
         if self.granted:
-            raise ContainerError(f"'{self.path_str}' is filled by grants; it is not loaded from a save")
-        entries = self.shape.load(self, saved)
+            if saved is not None:
+                raise ContainerError(f"'{self.path_str}' is filled by grants; it is not loaded from a save")
+            return
+        entries = self.shape.load(self, saved if saved is not None else self._seed_save())
         with self.owner.batch():
             for key in list(self._children):
                 if key not in entries:
@@ -399,27 +389,43 @@ class Container:
             for key, data in entries.items():
                 self._put(key, data)
 
-    def _load_into_fixed(self, saved: Any) -> None:
+    def _seed_save(self) -> Any:
+        """The seed, shaped like a save of this container — what a new instance starts with."""
+        return self.shape.save([(str(index), DbData(def_id)) for index, def_id in enumerate(self.seed)])
+
+    def _load_fixed(self, saved: Any) -> None:
         """
         Fixed children are never regenerated: the save is loaded into them, so
         nothing bound to them is lost. (The old StaticContainer regenerated them,
         which is why the Entity's container order was load-bearing.)
         """
-        for key, data in self.shape.load(self, saved).items():
-            child = self._children.get(key)
-            if child is None:
-                raise ContainerError(
-                    f"'{self.path_str}' has no fixed entry '{key}'{did_you_mean(key, self._children)}"
-                )
-            if data.def_id != child.id:
-                raise ContainerError(f"'{self.path_str}:{key}' is a '{child.id}', the save says '{data.def_id}'")
-            child._load(data)
+        fixed = self._fixed_entries()
+        entries = self.shape.load(self, saved) if saved is not None else {}
+        for key, data in entries.items():
+            if key not in fixed:
+                raise ContainerError(f"'{self.path_str}' has no fixed entry '{key}'{did_you_mean(key, fixed)}")
+            if data.def_id != fixed[key]:
+                raise ContainerError(f"'{self.path_str}:{key}' is a '{fixed[key]}', the save says '{data.def_id}'")
+        with self.owner.batch():
+            for key, def_id in fixed.items():
+                data = entries[key] if key in entries else DbData(def_id)
+                child = self._children.get(key)
+                if child is None:
+                    self._put(key, data)
+                else:
+                    child.load(data)
+
+    def _fixed_entries(self) -> dict[str, str]:
+        """Key → definition id of every fixed entry: the seed of a list, one ``of`` per key otherwise."""
+        if self.shape.name == "list":
+            return {str(index): def_id for index, def_id in enumerate(self.seed)}
+        return {key: self.of for key in self.shape.fixed_keys(self)}
 
     def to_data(self) -> Any:
         """The saved form, shaped like the container; ``None`` when there is nothing to save."""
         if self.granted:
             return None  # rebuilt by the grants
-        items = [(key, self._children[key].to_data()) for key in self.shape.order(self._children)]
+        items = [(key, self._children[key]._save()) for key in self.shape.order(self._children)]
         if self.fixed:
             items = [(key, data) for key, data in items if not data.is_empty()]
             return self.shape.save(items) if items else None

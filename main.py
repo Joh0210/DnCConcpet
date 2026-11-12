@@ -7,7 +7,7 @@ Run:  python main.py        Tests:  python -m unittest
 import json
 
 from Instance import Instance
-from tests.fixtures import make_store
+from tests.fixtures import TEST_GAME
 
 
 def breakdown(prop) -> str:
@@ -20,8 +20,7 @@ def breakdown(prop) -> str:
 
 
 if __name__ == '__main__':
-    store = make_store()
-    hero = Instance("character", store=store)
+    hero = Instance.new("character", TEST_GAME)
     hero.container("attributes").get("str").prop("value").choose(12)
 
     axe = hero.container("equipment").add("battleaxe", "mainHand")
@@ -43,5 +42,7 @@ if __name__ == '__main__':
     print(breakdown(hero.container("attributes").get("dex").prop("value")))
 
     print("\n-- save --")
-    print(json.dumps(hero.to_data().to_dict(), indent=2))
+    save = hero.to_data()
+    print(json.dumps(save.to_dict(), indent=2))
+    print("rebuilt from the save alone:", Instance(save).to_data() == save)
     print("issues:", hero.issues() or "none")
