@@ -26,7 +26,7 @@ if __name__ == '__main__':
 
     axe = hero.container("equipment").add("battleaxe", "mainHand")
     axe.container("material").add("steel")
-    axe.container("enchantments").add({"def": "keen", "choices": {"level": "2"}})
+    axe.container("enchantments").add({"def": "keen", "props": {"level": "2"}})
     boost = axe.container("enchantments").add("ability-score-boost")
     boost.prop("stat").choose("dex")
     hero.container("feats").add("fleet-footed")

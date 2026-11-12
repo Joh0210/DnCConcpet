@@ -15,9 +15,10 @@ class DbData:
     definitions cannot know; everything else is rebuilt from them:
 
     - ``def_id``: the definition id (JSON key ``def``),
-    - ``choices``: serialized values of ``choice`` props the user picked
-      (being present here *is* the "reviewed" flag — no extra wire format),
-    - ``state``: serialized values of ``state`` props that changed in play,
+    - ``props``: prop id → serialized value of every ``choice`` prop the user picked
+      and every ``state`` prop that changed in play. Which of the two a prop is
+      comes from its definition, so the save does not repeat it; a ``choice``
+      being present here *is* the "reviewed" flag — no extra wire format,
     - ``children``: container id → saved children, shaped like the container.
 
     Values are strings produced by ``Datatype.serialize``; reading accepts native
@@ -25,21 +26,18 @@ class DbData:
     """
 
     def_id: str
-    choices: dict[str, Any] = field(default_factory=dict)
-    state: dict[str, Any] = field(default_factory=dict)
+    props: dict[str, Any] = field(default_factory=dict)
     children: dict[str, ChildrenData] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         """Nothing beyond the definition id — the instance is exactly its definition."""
-        return not self.choices and not self.state and not self.children
+        return not self.props and not self.children
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-compatible dict with the keys of concept §4.13; empty sections are left out."""
         result: dict[str, Any] = {"def": self.def_id}
-        if self.choices:
-            result["choices"] = dict(self.choices)
-        if self.state:
-            result["state"] = dict(self.state)
+        if self.props:
+            result["props"] = dict(self.props)
         if self.children:
             result["children"] = {
                 container_id: _children_to_dict(children)
@@ -51,8 +49,7 @@ class DbData:
     def from_dict(cls, data: dict[str, Any]) -> DbData:
         return cls(
             def_id=data["def"],
-            choices=dict(data.get("choices", {})),
-            state=dict(data.get("state", {})),
+            props=dict(data.get("props", {})),
             children={
                 container_id: _children_from_dict(children)
                 for container_id, children in data.get("children", {}).items()

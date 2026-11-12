@@ -389,8 +389,11 @@ class Property:
     # ------------------------------------------------------------------ save
 
     def serialize(self) -> str | None:
-        """What the save stores for this property, or ``None`` (not saved, or still the default)."""
-        if self.source.save_section is None or not self._has_stored:
+        """
+        What the save stores for this property, or ``None`` (still the default).
+        Only ``choose`` / ``write`` store a value, so only choice and state props are ever saved.
+        """
+        if not self._has_stored:
             return None
         return self.datatype.serialize(self._stored)
 

@@ -444,13 +444,15 @@ A save stores only what the definitions cannot know:
 
 ```yaml
 def: battleaxe
-state: { stack: 1 }
+props: { stack: 1 }
 children:
-  material: { def: shadow, choices: { level: 2 } }
+  material: { def: shadow, props: { level: 2 } }
   enchantments:
-    - { def: elemental-weapon-power, choices: { level: 3, dmgType: fire } }
+    - { def: elemental-weapon-power, props: { level: 3, dmgType: fire } }
 ```
 
+`props` holds the picked `choice` values and the changed `state` values; which
+of the two a prop is comes from its definition, so the save does not repeat it.
 Everything else is rebuilt from the definitions. The validator can check saves
 too (unknown def, choice out of range) — the hook for migrations when content
 changes.

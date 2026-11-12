@@ -22,8 +22,6 @@ class Source:
     _registry: ClassVar[dict[str, Source]] = {}
 
     name: ClassVar[str] = ""
-    #: Section of the save the value goes into (``"choices"`` / ``"state"``); ``None`` = not saved.
-    save_section: ClassVar[str | None] = None
     #: A definition may give it a value with ``set``.
     settable: ClassVar[bool] = True
     #: The user picks the value (Wiki / sheet) → ``Property.choose``.
@@ -72,7 +70,6 @@ class ChoiceSource(Source):
     """Picked per instance within ``range`` / ``options``; the default until picked. Saved."""
 
     name = "choice"
-    save_section = "choices"
     choosable = True
 
     def base(self, prop: Property) -> Any:
@@ -83,7 +80,6 @@ class StateSource(Source):
     """Changes during play, written only by steps; ``range`` clamps every write. Saved."""
 
     name = "state"
-    save_section = "state"
     writable = True
 
     def base(self, prop: Property) -> Any:

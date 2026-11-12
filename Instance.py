@@ -404,7 +404,7 @@ class Instance:
         for prop in self.props.values():
             serialized = prop.serialize()
             if serialized is not None:
-                getattr(data, prop.source.save_section)[prop.id] = serialized
+                data.props[prop.id] = serialized
         for container_id, container in self.containers.items():
             saved = container.to_data()
             if saved is not None:
@@ -422,14 +422,8 @@ class Instance:
                 self.containers[container_id].load_data(saved)
 
     def _load_values(self, data: DbData) -> None:
-        for section in ("choices", "state"):
-            for prop_id, raw in getattr(data, section).items():
-                prop = self.prop(prop_id)
-                if prop.source.save_section != section:
-                    raise PropertyError(
-                        f"'{prop.path_str}' is {prop.source.name}; it cannot be loaded from '{section}'"
-                    )
-                prop.deserialize(raw)
+        for prop_id, raw in data.props.items():
+            self.prop(prop_id).deserialize(raw)
 
     def _check_saved_containers(self, data: DbData) -> None:
         for container_id in data.children:

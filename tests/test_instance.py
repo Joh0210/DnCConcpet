@@ -104,7 +104,7 @@ class SaveTest(unittest.TestCase):
         char.container("attributes").get("str").prop("value").choose(14)
         axe = char.container("equipment").add("battleaxe", "mainHand")
         axe.container("material").add("steel")
-        axe.container("enchantments").add({"def": "keen", "choices": {"level": "2"}})
+        axe.container("enchantments").add({"def": "keen", "props": {"level": "2"}})
         boost = axe.container("enchantments").add("ability-score-boost")
         boost.prop("stat").choose("dex")
         rope = char.container("inventory").add("rope")
@@ -128,23 +128,23 @@ class SaveTest(unittest.TestCase):
         self.assertEqual(attribute(loaded, "dex"), 13)  # 10 + boost level 1
         self.assertEqual(walking(loaded), 40)
 
-    def test_choices_and_state_are_saved_as_strings_in_their_section(self):
+    def test_choices_and_state_are_saved_as_strings(self):
         data = self.build_character().to_data()
-        self.assertEqual(data.choices, {"level": "5"})
-        self.assertEqual(data.children["attributes"], {"str": DbData("attribute", choices={"value": "14"})})
-        self.assertEqual(data.children["inventory"], [DbData("rope", state={"stack": "3"})])
+        self.assertEqual(data.props, {"level": "5"})
+        self.assertEqual(data.children["attributes"], {"str": DbData("attribute", props={"value": "14"})})
+        self.assertEqual(data.children["inventory"], [DbData("rope", props={"stack": "3"})])
 
     def test_unknown_container_in_a_save_is_reported(self):
         with self.assertRaisesRegex(ContainerError, "did you mean 'inventory'"):
             new("character", {"def": "character", "children": {"inventroy": []}})
 
-    def test_a_value_in_the_wrong_section_is_reported(self):
-        with self.assertRaisesRegex(PropertyError, "cannot be loaded from 'state'"):
-            new("character", {"def": "character", "state": {"level": "3"}})
+    def test_a_value_of_an_unsaved_prop_is_reported(self):
+        with self.assertRaisesRegex(PropertyError, "is derived; it is not saved"):
+            new("character", {"def": "character", "props": {"featCount": "3"}})
 
     def test_a_choice_out_of_range_in_a_save_is_reported(self):
         with self.assertRaisesRegex(PropertyError, "outside the range"):
-            new("character", {"def": "character", "choices": {"level": "42"}})
+            new("character", {"def": "character", "props": {"level": "42"}})
 
     def test_save_of_another_definition_is_rejected(self):
         with self.assertRaises(DefinitionError):
